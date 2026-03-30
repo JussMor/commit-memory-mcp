@@ -7,7 +7,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { openDatabase } from "../db/client.js";
 import { indexRepository } from "../indexer.js";
 import { explainCommitMatch, searchRelatedCommits } from "../search/query.js";
@@ -184,7 +186,26 @@ export async function startMcpServer(): Promise<void> {
   await server.connect(transport);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isDirectExecution(): boolean {
+  const argvPath = process.argv[1];
+  if (!argvPath) {
+    return false;
+  }
+
+  const directHref = pathToFileURL(path.resolve(argvPath)).href;
+  if (directHref === import.meta.url) {
+    return true;
+  }
+
+  try {
+    const realHref = pathToFileURL(fs.realpathSync(argvPath)).href;
+    return realHref === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution()) {
   startMcpServer().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : "Unknown error";
     process.stderr.write(`${message}\n`);

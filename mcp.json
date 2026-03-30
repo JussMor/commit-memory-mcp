@@ -1,17 +1,18 @@
 {
-  "mcpServers": {
+  "servers": {
     "commit-memory-mcp": {
-      "command": "npx",
-      "args": ["-y", "@jussmor/commit-memory-mcp"],
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/packages/commit-rag-mcp/dist/mcp/server.js"
+      ],
       "env": {
         "COMMIT_RAG_REPO": "${workspaceFolder}",
         "COMMIT_RAG_DB": "${workspaceFolder}/.commit-rag.db",
         "COMMIT_RAG_LIMIT": "400",
         "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
         "OLLAMA_EMBED_MODEL": "nomic-embed-text"
-      },
-      "disabled": false,
-      "alwaysAllow": []
+      }
     }
   }
 }
