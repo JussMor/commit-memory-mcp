@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "commit-rag": {
+    "commit-memory-mcp": {
       "command": "npx",
-      "args": ["commit-rag-mcp"],
+      "args": ["-y", "@jussmor/commit-memory-mcp"],
       "env": {
         "COMMIT_RAG_REPO": "${workspaceFolder}",
         "COMMIT_RAG_DB": "${workspaceFolder}/.commit-rag.db",
