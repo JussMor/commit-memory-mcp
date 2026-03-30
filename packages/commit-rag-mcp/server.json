@@ -1,0 +1,58 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jussmor/commit-memory",
+  "description": "Local commit-aware RAG MCP server for semantic git history search using SQLite vectors.",
+  "repository": {
+    "url": "https://github.com/JussMor/commit-memory-mcp",
+    "source": "github"
+  },
+  "version": "0.3.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@jussmor/commit-memory-mcp",
+      "version": "0.3.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "environmentVariables": [
+        {
+          "name": "COMMIT_RAG_REPO",
+          "description": "Absolute path to the target git repository.",
+          "format": "string",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "COMMIT_RAG_DB",
+          "description": "Absolute path to the SQLite database file.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "COMMIT_RAG_LIMIT",
+          "description": "Maximum number of commits to index per run.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "OLLAMA_BASE_URL",
+          "description": "Ollama base URL for embedding requests.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "OLLAMA_EMBED_MODEL",
+          "description": "Embedding model name to use with Ollama.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

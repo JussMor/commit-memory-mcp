@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "commit-memory-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@jussmor/commit-memory-mcp"
+      ],
+      "env": {
+        "COMMIT_RAG_REPO": "/absolute/path/to/target/repo",
+        "COMMIT_RAG_DB": "/absolute/path/to/target/repo/.commit-rag.db",
+        "COMMIT_RAG_LIMIT": "800",
+        "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+        "OLLAMA_EMBED_MODEL": "nomic-embed-text"
+      }
+    }
+  }
+}
