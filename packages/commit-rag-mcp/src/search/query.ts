@@ -1,6 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { SearchResult } from "../types.js";
 import { embedText } from "./embeddings.js";
+import { copilotRerankEnabled, rerankWithCopilot } from "./rerank.js";
 
 type VecRow = {
   distance: number;
@@ -45,6 +46,10 @@ export async function searchRelatedCommits(
   limit: number,
   activeFile?: string,
 ): Promise<SearchResult[]> {
+  // Fetch extra candidates when Copilot reranking is enabled so the LLM has
+  // more to work with before we trim to the requested limit.
+  const fetchLimit = copilotRerankEnabled() ? limit * 2 : limit;
+
   const embedding = await embedText(query);
   const embeddingJson = JSON.stringify(embedding);
 
@@ -68,9 +73,9 @@ export async function searchRelatedCommits(
         WHERE v.embedding MATCH ? AND k = ?
       `,
       )
-      .all(embeddingJson, limit) as VecRow[];
+      .all(embeddingJson, fetchLimit) as VecRow[];
 
-    return rows.map((row) => {
+    const candidates = rows.map((row) => {
       const base = 1 / (1 + Math.max(0, row.distance));
       const score = scoreWithBoost(base, row, activeFile);
       return {
@@ -84,6 +89,8 @@ export async function searchRelatedCommits(
         preview: createPreview(row.hunk_text),
       };
     });
+    const reranked = await rerankWithCopilot(query, candidates);
+    return reranked.slice(0, limit);
   } catch {
     const rows = db
       .prepare(
@@ -103,9 +110,9 @@ export async function searchRelatedCommits(
         LIMIT ?
       `,
       )
-      .all(`%${query}%`, limit) as KeywordRow[];
+      .all(`%${query}%`, fetchLimit) as KeywordRow[];
 
-    return rows.map((row, idx) => ({
+    const keywordCandidates = rows.map((row, idx) => ({
       chunkId: row.chunk_id,
       sha: row.sha,
       filePath: row.file_path,
@@ -119,6 +126,8 @@ export async function searchRelatedCommits(
       author: row.author,
       preview: createPreview(row.hunk_text),
     }));
+    const rerankedKeyword = await rerankWithCopilot(query, keywordCandidates);
+    return rerankedKeyword.slice(0, limit);
   }
 }
 

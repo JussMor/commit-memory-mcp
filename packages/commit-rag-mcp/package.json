@@ -1,6 +1,6 @@
 {
   "name": "@jussmor/commit-memory-mcp",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "mcpName": "io.github.jussmor/commit-memory",
   "description": "Commit-aware RAG with sqlite-vec and MCP tools for local agent workflows",
   "license": "MIT",

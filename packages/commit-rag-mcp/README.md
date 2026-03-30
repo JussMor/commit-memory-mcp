@@ -47,3 +47,14 @@ For MCP Registry publication, keep `package.json` `mcpName` and `server.json` `n
 - `OLLAMA_EMBED_MODEL` local embedding model name
 
 If `OLLAMA_EMBED_MODEL` is not set, the package uses deterministic local fallback embeddings.
+
+### Copilot LLM reranking (optional)
+
+Set `COPILOT_TOKEN` to a GitHub token with Copilot access to enable LLM-based reranking.
+After initial vector/keyword retrieval, results are sent to Copilot for semantic scoring and re-sorted.
+
+- `COPILOT_TOKEN` GitHub PAT or token with Copilot access (enables reranking)
+- `COPILOT_MODEL` model slug (default: `gpt-4o-mini`, supports `claude-sonnet-4-5`, `gpt-4o`, etc.)
+- `COPILOT_BASE_URL` API base URL (default: `https://api.githubcopilot.com`)
+
+Reranking works alongside or instead of Ollama — no embedding model required.
