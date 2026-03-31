@@ -1,243 +1,236 @@
 # AI Plans - Maxwell Clinic
 
-An intelligent AI agent system for GitHub Copilot that provides semantic search over git commit history and multi-agent workflow orchestration.
+A worktree-aware PR intelligence system for GitHub Copilot and async engineering teams.
 
-## Features
+## What it does
 
-✨ **Semantic Commit Search** – Find related commits by meaning, not just keywords  
-🔄 **Automatic Context** – Copilot automatically searches your git history for answers  
-🛠️ **Multi-Agent Orchestration** – Chain agents into complex workflows  
-⚡ **Fast Local Search** – SQLite vectors with optional Ollama embeddings  
-🎯 **Copilot Integration** – Works seamlessly with GitHub Copilot Chat
+This repository provides a local MCP server that helps teams answer:
 
-## Quick Start
+- Who changed this area?
+- Why was it changed?
+- What landed on main while I was away?
+- What should I review before planning new work?
 
-### 1️⃣ Setup
+Instead of relying only on commit search, the current system combines:
+
+- local git history
+- GitHub PR descriptions
+- GitHub PR comments and reviews
+- promoted decision/blocker context
+- active git worktrees for parallel feature sessions
+
+## Current MCP tools
+
+- `sync_pr_context`
+- `list_active_worktrees`
+- `who_changed_this`
+- `why_was_this_changed`
+- `get_main_branch_overnight_brief`
+- `resume_feature_session_brief`
+- `pre_plan_sync_brief`
+
+## Breaking change
+
+These old tools were removed:
+
+- `search_related_commits`
+- `explain_commit_match`
+- `get_commit_diff`
+- `reindex_commits`
+
+See [.github/copilot-instructions.md](./.github/copilot-instructions.md) for the current workflow contract.
+
+## Why this exists
+
+Async teams lose context in three places:
+
+1. Commit messages describe a small change but not the final feature decision.
+2. PR comments contain important discussion, but they are noisy and hard to recover later.
+3. Engineers switch branches and worktrees and need a fast "what changed while I was sleeping" brief before planning.
+
+This project makes PR description the canonical feature narrative, treats review discussion as secondary evidence, and produces a pre-plan sync brief before implementation starts.
+
+## Quick start
+
+### 1. Install and build
 
 ```bash
 npm install
-npx commit-rag-index --repo ${PWD}
+cd packages/commit-rag-mcp
+npm run build
 ```
 
-### 2️⃣ Configure Copilot
+### 2. Configure MCP in VS Code
 
-Copy `mcp.json` to your VS Code MCP config location (see [SETUP.md](./SETUP.md))
+The workspace already includes [mcp.json](./mcp.json).
 
-### 3️⃣ Ask Copilot
+Reload VS Code and enable the `commit-memory-mcp` server in the MCP tools panel.
 
-```
-What commits are related to authentication?
-```
-
-👉 **See [SETUP.md](./SETUP.md) for detailed setup instructions**
-
-## Agents
-
-### 🔍 Commit RAG Agent
-
-Semantic search over git commits with optional Ollama embeddings.
-
-**Tools:**
-
-- `search_related_commits` – Find related commits by query
-- `explain_commit_match` – Get detailed info for a commit
-- `get_commit_diff` – Retrieve full git diff
-- `reindex_commits` – Update commit index
-
-📖 [Full docs](./packages/commit-rag-mcp/README.md)
-
-### 🎼 Agent Orchestrator (Coming Soon)
-
-Multi-agent workflow engine for complex AI tasks.
-
-## Documentation
-
-| Document                                                               | Purpose                      |
-| ---------------------------------------------------------------------- | ---------------------------- |
-| [SETUP.md](./SETUP.md)                                                 | Installation and setup guide |
-| [.github/copilot-instructions.md](./.github/copilot-instructions.md)   | How to use with Copilot      |
-| [.github/agents/README.md](./.github/agents/README.md)                 | Agent system overview        |
-| [.github/agents/commit-rag.md](./.github/agents/commit-rag.md)         | Commit RAG agent spec        |
-| [.github/agents/orchestrator.md](./.github/agents/orchestrator.md)     | Orchestrator design          |
-| [.github/agents/agent-template.md](./.github/agents/agent-template.md) | Build new agents             |
-
-## Project Structure
-
-```
-├── packages/
-│   ├── commit-rag-mcp/          MCP server for semantic commit search
-│   └── agent-orchestrator/      Workflow engine for multi-agent systems
-├── .github/
-│   ├── agents/                  Agent specifications & templates
-│   └── copilot-instructions.md  Copilot integration guide
-├── mcp.json                     Copilot MCP configuration
-├── SETUP.md                     Installation & setup guide
-└── README.md                    This file
-```
-
-## How It Works
-
-```
-┌─────────────────────────────┐
-│   GitHub Copilot Chat       │
-│  "Find auth bugs"           │
-└────────────┬────────────────┘
-             │
-┌────────────▼────────────────┐
-│    MCP Protocol             │
-│  (Tool Discovery & Calls)   │
-└────────────┬────────────────┘
-             │
-┌────────────▼────────────────┐
-│  Commit RAG Agent           │
-│  • Search commits           │
-│  • Explain matches          │
-│  • Get diffs                │
-└────────────┬────────────────┘
-             │
-┌────────────▼────────────────┐
-│  SQLite Vector DB           │
-│  + Optional Ollama          │
-└─────────────────────────────┘
-```
-
-## Environment Variables
-
-### Required
-
-- `COMMIT_RAG_REPO` – Path to git repository (defaults to workspace)
-
-### Optional
-
-- `COMMIT_RAG_DB` – Path to SQLite database (default: `.commit-rag.db`)
-- `OLLAMA_EMBED_MODEL` – Use semantic embeddings (e.g., `nomic-embed-text`)
-- `OLLAMA_BASE_URL` – Ollama server URL (default: `http://127.0.0.1:11434`)
-
-See [SETUP.md](./SETUP.md) for configuration details.
-
-## Usage Examples
-
-### With Copilot Chat
-
-**Find related work:**
-
-```
-@Copilot What authentication improvements have been made?
-```
-
-**Understand code changes:**
-
-```
-@Copilot Why was the JWT refresh logic changed? Show me related commits.
-```
-
-**Research features:**
-
-```
-@Copilot Have we implemented password reset before? Search our history.
-```
-
-**Code review context:**
-
-```
-@Copilot What was the context for [paste code]? Find related commits.
-```
-
-### Programmatic Use
-
-```typescript
-import { Orchestrator, workflow } from "@maxwellclinic/agent-orchestrator";
-
-const orchestrator = new Orchestrator();
-orchestrator.registerAgent({
-  name: "commit-rag",
-  executable: "npx",
-  args: ["commit-rag-mcp"],
-});
-
-await orchestrator.initialize();
-const result = await orchestrator.execute({
-  name: "search",
-  steps: [
-    {
-      id: "1",
-      name: "Search commits",
-      call: {
-        agent: "commit-rag",
-        tool: "search_related_commits",
-        input: { query: "authentication" },
-      },
-    },
-  ],
-});
-```
-
-## Development
-
-### Build
+### 3. Authenticate GitHub CLI
 
 ```bash
-# Build all packages
-cd packages/commit-rag-mcp && npm run build
-cd packages/agent-orchestrator && npm run build
+gh auth status
 ```
 
-### Test
+If `gh` is not authenticated, PR sync tools cannot fetch PR descriptions/comments/reviews.
 
-```bash
-# Test commit-rag agent
-npx commit-rag-index --repo ${PWD} --limit 10
-npx commit-rag-mcp
+### 4. Start with the pre-plan brief
+
+Ask Copilot to run:
+
+```text
+Run pre_plan_sync_brief for MaxwellClinic-Development/EverBetter-Pro
 ```
 
-### Create New Agent
+Or invoke the tool directly through MCP.
 
-Follow [.github/agents/agent-template.md](./.github/agents/agent-template.md)
+## Recommended team workflow
 
-## Troubleshooting
+1. Start every coding session with `pre_plan_sync_brief`.
+2. Review blocker-level decisions before making code changes.
+3. Check `resume_feature_session_brief` after rebases or major merges.
+4. Keep PR descriptions updated with final decisions from review threads.
 
-- **Copilot doesn't see agent?** → See [SETUP.md#troubleshooting](./SETUP.md#troubleshooting)
-- **No search results?** → Run `npx commit-rag-index` to index commits
-- **Slow searches?** → Install Ollama for semantic embeddings
-- **Questions?** → Check [.github/copilot-instructions.md](./.github/copilot-instructions.md)
+## Use cases
 
-## Tech Stack
+### 1. Start-of-day sync
 
-- **Node.js 20+** – Runtime
-- **TypeScript** – Language
-- **MCP** – Protocol for tool discovery
-- **SQLite + sqlite-vec** – Vector database
-- **Ollama** – Optional semantic embeddings
-- **VS Code Copilot** – AI interface
+Problem:
+You were offline overnight and want to know what changed on `main` before continuing work.
+
+Use:
+
+```text
+Run get_main_branch_overnight_brief for main in the last 12 hours
+```
+
+Outcome:
+You get a compact author/date/subject summary of recent main-branch commits.
+
+### 2. Resume an unfinished feature in another worktree
+
+Problem:
+You have multiple features open in different git worktrees and need to know whether your branch is behind or colliding with main.
+
+Use:
+
+```text
+Run resume_feature_session_brief for this worktree against main
+```
+
+Outcome:
+You get branch divergence and overlapping file risk before you start planning or rebasing.
+
+### 3. Understand who changed a file recently
+
+Problem:
+A file is behaving differently and you want the likely authors and recent commits.
+
+Use:
+
+```text
+Run who_changed_this for src/features/auth/session.ts
+```
+
+Outcome:
+You get top authors, recent commits, and a fast ownership trail.
+
+### 4. Explain why a change was made
+
+Problem:
+A commit or file changed, but the commit alone is not enough to explain the reasoning.
+
+Use:
+
+```text
+Run why_was_this_changed for src/features/auth/session.ts
+```
+
+Or:
+
+```text
+Run why_was_this_changed for sha abc1234
+```
+
+Outcome:
+The agent combines commit metadata with synced PR description and promoted decision context.
+
+### 5. Sync PR context before implementation planning
+
+Problem:
+Your team writes strong PR descriptions and review discussions, and you want plans to reflect that context.
+
+Use:
+
+```text
+Run sync_pr_context for MaxwellClinic-Development/EverBetter-Pro
+```
+
+Outcome:
+PR descriptions, comments, and reviews are stored locally for later author/why analysis.
+
+### 6. One-command pre-plan briefing
+
+Problem:
+You want a single command that syncs GitHub context, checks main, checks your feature session, and tells you what to do first.
+
+Use:
+
+```text
+Run pre_plan_sync_brief for MaxwellClinic-Development/EverBetter-Pro with baseBranch main
+```
+
+Outcome:
+You get:
+
+- PR sync status
+- overnight main changes
+- branch ahead/behind counts
+- overlap files
+- recommended first actions
 
 ## Architecture
 
-- Modular monorepo structure
-- Each agent is an independent MCP server
-- Orchestrator coordinates multi-agent workflows
-- Copilot Chat as the primary user interface
+```text
+GitHub Copilot / MCP Client
+          |
+          v
+ commit-memory-mcp
+          |
+          +-- git history
+          +-- GitHub PR metadata via gh
+          +-- SQLite context store
+          +-- worktree session tracking
+```
 
-## Future Roadmap
+## Project structure
 
-- [ ] Database query agent
-- [ ] Code analysis and refactoring agent
-- [ ] PR/Issue summarization
-- [ ] Distributed workflow execution
-- [ ] Web UI for agent management
-- [ ] Advanced retry and error recovery
+```text
+packages/
+  commit-rag-mcp/        MCP server and local context engine
+.github/
+  agents/                Agent specifications
+  copilot-instructions.md
+mcp.json                 Workspace MCP configuration
+SETUP.md                 Setup guide
+README.md                Overview and workflow guide
+```
 
-## License
+## Documentation
 
-MIT
+- [SETUP.md](./SETUP.md)
+- [.github/copilot-instructions.md](./.github/copilot-instructions.md)
+- [.github/agents/README.md](./.github/agents/README.md)
+- [.github/agents/commit-rag.md](./.github/agents/commit-rag.md)
+- [packages/commit-rag-mcp/README.md](./packages/commit-rag-mcp/README.md)
 
-## Support
+## Development notes
 
-For issues, questions, or contributions:
+- Node.js 20+
+- `gh` CLI is required for PR sync features
+- SQLite is used as the local durable context store
+- Worktree-aware planning is a first-class use case
 
-1. Check documentation in `.github/agents/`
-2. Review troubleshooting in [SETUP.md](./SETUP.md)
-3. File an issue in the repository
+## Next documentation step
 
----
-
-**Ready to get started?** 👉 [SETUP.md](./SETUP.md)
+[SETUP.md](./SETUP.md) still needs the migration and sync-before-plan update to fully match the current tool contract.
