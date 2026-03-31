@@ -1,5 +1,4 @@
-# AI Plans - Maxwell Clinic
-
+# AI Plans 
 A worktree-aware PR intelligence system for GitHub Copilot and async engineering teams.
 
 ## What it does
