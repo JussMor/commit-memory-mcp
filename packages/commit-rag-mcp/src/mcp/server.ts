@@ -364,8 +364,9 @@ export async function startMcpServer(): Promise<void> {
       const domain = String(request.params.arguments?.domain ?? "").trim();
       const feature = String(request.params.arguments?.feature ?? "").trim();
       const branch = String(request.params.arguments?.branch ?? "").trim();
-      const sourceType =
-        String(request.params.arguments?.sourceType ?? "").trim();
+      const sourceType = String(
+        request.params.arguments?.sourceType ?? "",
+      ).trim();
 
       const db = openDatabase(dbPath);
       try {
