@@ -2,7 +2,14 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { load } from "sqlite-vec";
-import type { CommitChunk } from "../types.js";
+import type {
+  CommitChunk,
+  PullRequestCommentRecord,
+  PullRequestDecisionRecord,
+  PullRequestRecord,
+  PullRequestReviewRecord,
+  WorktreeSessionRecord,
+} from "../types.js";
 
 export type RagDatabase = Database.Database;
 
@@ -44,6 +51,76 @@ export function openDatabase(dbPath: string): RagDatabase {
     CREATE TABLE IF NOT EXISTS index_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       last_indexed_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS prs (
+      repo_owner TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      author TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      merged_at TEXT,
+      url TEXT NOT NULL,
+      PRIMARY KEY (repo_owner, repo_name, pr_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS pr_comments (
+      id TEXT PRIMARY KEY,
+      repo_owner TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      author TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      url TEXT NOT NULL,
+      FOREIGN KEY (repo_owner, repo_name, pr_number)
+        REFERENCES prs(repo_owner, repo_name, pr_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS pr_reviews (
+      id TEXT PRIMARY KEY,
+      repo_owner TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      author TEXT NOT NULL,
+      state TEXT NOT NULL,
+      body TEXT NOT NULL,
+      submitted_at TEXT NOT NULL,
+      FOREIGN KEY (repo_owner, repo_name, pr_number)
+        REFERENCES prs(repo_owner, repo_name, pr_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS pr_decisions (
+      id TEXT PRIMARY KEY,
+      repo_owner TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      pr_number INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      author TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (repo_owner, repo_name, pr_number)
+        REFERENCES prs(repo_owner, repo_name, pr_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS pr_sync_state (
+      repo_owner TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      last_synced_at TEXT NOT NULL,
+      PRIMARY KEY (repo_owner, repo_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS worktree_sessions (
+      path TEXT PRIMARY KEY,
+      branch TEXT NOT NULL,
+      base_branch TEXT NOT NULL,
+      last_synced_at TEXT NOT NULL
     );
   `);
 
@@ -125,4 +202,215 @@ export function touchIndexState(db: RagDatabase): void {
         last_indexed_at = excluded.last_indexed_at
     `,
   ).run(now);
+}
+
+export function upsertPullRequest(db: RagDatabase, pr: PullRequestRecord): void {
+  db.prepare(
+    `
+      INSERT INTO prs (
+        repo_owner,
+        repo_name,
+        pr_number,
+        title,
+        body,
+        author,
+        state,
+        created_at,
+        updated_at,
+        merged_at,
+        url
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(repo_owner, repo_name, pr_number) DO UPDATE SET
+        title = excluded.title,
+        body = excluded.body,
+        author = excluded.author,
+        state = excluded.state,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        merged_at = excluded.merged_at,
+        url = excluded.url
+    `,
+  ).run(
+    pr.repoOwner,
+    pr.repoName,
+    pr.number,
+    pr.title,
+    pr.body,
+    pr.author,
+    pr.state,
+    pr.createdAt,
+    pr.updatedAt,
+    pr.mergedAt,
+    pr.url,
+  );
+}
+
+export function replacePullRequestComments(
+  db: RagDatabase,
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  comments: PullRequestCommentRecord[],
+): void {
+  db.prepare(
+    `
+      DELETE FROM pr_comments
+      WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?
+    `,
+  ).run(repoOwner, repoName, prNumber);
+
+  const insert = db.prepare(
+    `
+      INSERT INTO pr_comments (
+        id,
+        repo_owner,
+        repo_name,
+        pr_number,
+        author,
+        body,
+        created_at,
+        updated_at,
+        url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  );
+
+  for (const comment of comments) {
+    insert.run(
+      comment.id,
+      repoOwner,
+      repoName,
+      prNumber,
+      comment.author,
+      comment.body,
+      comment.createdAt,
+      comment.updatedAt,
+      comment.url,
+    );
+  }
+}
+
+export function replacePullRequestReviews(
+  db: RagDatabase,
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  reviews: PullRequestReviewRecord[],
+): void {
+  db.prepare(
+    `
+      DELETE FROM pr_reviews
+      WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?
+    `,
+  ).run(repoOwner, repoName, prNumber);
+
+  const insert = db.prepare(
+    `
+      INSERT INTO pr_reviews (
+        id,
+        repo_owner,
+        repo_name,
+        pr_number,
+        author,
+        state,
+        body,
+        submitted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  );
+
+  for (const review of reviews) {
+    insert.run(
+      review.id,
+      repoOwner,
+      repoName,
+      prNumber,
+      review.author,
+      review.state,
+      review.body,
+      review.submittedAt,
+    );
+  }
+}
+
+export function replacePullRequestDecisions(
+  db: RagDatabase,
+  repoOwner: string,
+  repoName: string,
+  prNumber: number,
+  decisions: PullRequestDecisionRecord[],
+): void {
+  db.prepare(
+    `
+      DELETE FROM pr_decisions
+      WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?
+    `,
+  ).run(repoOwner, repoName, prNumber);
+
+  const insert = db.prepare(
+    `
+      INSERT INTO pr_decisions (
+        id,
+        repo_owner,
+        repo_name,
+        pr_number,
+        source,
+        author,
+        summary,
+        severity,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  );
+
+  for (const decision of decisions) {
+    insert.run(
+      decision.id,
+      repoOwner,
+      repoName,
+      prNumber,
+      decision.source,
+      decision.author,
+      decision.summary,
+      decision.severity,
+      decision.createdAt,
+    );
+  }
+}
+
+export function touchPullRequestSyncState(
+  db: RagDatabase,
+  repoOwner: string,
+  repoName: string,
+): void {
+  db.prepare(
+    `
+      INSERT INTO pr_sync_state (repo_owner, repo_name, last_synced_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(repo_owner, repo_name) DO UPDATE SET
+        last_synced_at = excluded.last_synced_at
+    `,
+  ).run(repoOwner, repoName, new Date().toISOString());
+}
+
+export function upsertWorktreeSession(
+  db: RagDatabase,
+  session: WorktreeSessionRecord,
+): void {
+  db.prepare(
+    `
+      INSERT INTO worktree_sessions (path, branch, base_branch, last_synced_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(path) DO UPDATE SET
+        branch = excluded.branch,
+        base_branch = excluded.base_branch,
+        last_synced_at = excluded.last_synced_at
+    `,
+  ).run(
+    session.path,
+    session.branch,
+    session.baseBranch,
+    session.lastSyncedAt,
+  );
 }
