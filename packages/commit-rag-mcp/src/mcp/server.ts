@@ -587,7 +587,9 @@ export async function startMcpServer(): Promise<void> {
     }
 
     if (request.params.name === "explain_path_activity") {
-      const targetPath = String(request.params.arguments?.targetPath ?? "").trim();
+      const targetPath = String(
+        request.params.arguments?.targetPath ?? "",
+      ).trim();
       const owner = String(request.params.arguments?.owner ?? "").trim();
       const repo = String(request.params.arguments?.repo ?? "").trim();
       const limit = Number(
@@ -609,7 +611,9 @@ export async function startMcpServer(): Promise<void> {
       const referencedPrNumbers = output.commits
         .map((commit) => {
           const details = commitDetails(repoPath, commit.sha);
-          return detectReferencedPrNumber(`${details.subject}\n${details.body}`);
+          return detectReferencedPrNumber(
+            `${details.subject}\n${details.body}`,
+          );
         })
         .filter((value): value is number => Number.isFinite(value));
 

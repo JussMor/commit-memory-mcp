@@ -71,6 +71,92 @@ export function whoChangedFile(options: {
   };
 }
 
+export function explainPathActivity(options: {
+  repoPath: string;
+  targetPath: string;
+  limit: number;
+}): {
+  targetPath: string;
+  commits: Array<{
+    sha: string;
+    author: string;
+    date: string;
+    subject: string;
+  }>;
+  topAuthors: Array<{ author: string; commitCount: number }>;
+  topFiles: Array<{ filePath: string; touchCount: number }>;
+} {
+  const repoPath = path.resolve(options.repoPath);
+  const limit = Math.max(1, options.limit);
+  const targetPath = options.targetPath.trim();
+
+  const commitsRaw = runGit(repoPath, [
+    "log",
+    `-n${limit}`,
+    "--format=%H%x1f%an%x1f%aI%x1f%s",
+    "--",
+    targetPath,
+  ]).trim();
+
+  if (!commitsRaw) {
+    return {
+      targetPath,
+      commits: [],
+      topAuthors: [],
+      topFiles: [],
+    };
+  }
+
+  const commits = commitsRaw.split("\n").map((line) => {
+    const [sha = "", author = "", date = "", subject = ""] = line.split("\x1f");
+    return { sha, author, date, subject };
+  });
+
+  const authorCounts = new Map<string, number>();
+  const fileCounts = new Map<string, number>();
+
+  for (const commit of commits) {
+    authorCounts.set(commit.author, (authorCounts.get(commit.author) ?? 0) + 1);
+
+    const filesRaw = runGit(repoPath, [
+      "show",
+      "--name-only",
+      "--pretty=format:",
+      commit.sha,
+      "--",
+      targetPath,
+    ]).trim();
+
+    if (!filesRaw) {
+      continue;
+    }
+
+    for (const filePath of filesRaw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)) {
+      fileCounts.set(filePath, (fileCounts.get(filePath) ?? 0) + 1);
+    }
+  }
+
+  const topAuthors = Array.from(authorCounts.entries())
+    .map(([author, commitCount]) => ({ author, commitCount }))
+    .sort((a, b) => b.commitCount - a.commitCount)
+    .slice(0, 8);
+
+  const topFiles = Array.from(fileCounts.entries())
+    .map(([filePath, touchCount]) => ({ filePath, touchCount }))
+    .sort((a, b) => b.touchCount - a.touchCount)
+    .slice(0, 12);
+
+  return {
+    targetPath,
+    commits,
+    topAuthors,
+    topFiles,
+  };
+}
+
 export function latestCommitForFile(
   repoPath: string,
   filePath: string,
