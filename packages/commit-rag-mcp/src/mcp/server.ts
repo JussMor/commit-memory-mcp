@@ -15,8 +15,8 @@ import {
   archiveFeatureContext,
   buildContextPack,
   getFeatureResume,
-  listLearnedFeatures,
   listAvailableBranches,
+  listLearnedFeatures,
   openDatabase,
   promoteContextFacts,
   upsertContextFact,
@@ -935,12 +935,18 @@ export async function startMcpServer(): Promise<void> {
 
           for (const feat of features) {
             markdown.push(`### ${feat.feature}`);
-            markdown.push(`- **Confidence:** ${(feat.confidence * 100).toFixed(0)}%`);
+            markdown.push(
+              `- **Confidence:** ${(feat.confidence * 100).toFixed(0)}%`,
+            );
             markdown.push(`- **Domain:** ${feat.domain}`);
             markdown.push(`- **Branch:** ${feat.branch}`);
             markdown.push(`- **Status:** ${feat.status}`);
-            markdown.push(`- **Created:** ${new Date(feat.createdAt).toLocaleString()}`);
-            markdown.push(`- **Updated:** ${new Date(feat.updatedAt).toLocaleString()}`);
+            markdown.push(
+              `- **Created:** ${new Date(feat.createdAt).toLocaleString()}`,
+            );
+            markdown.push(
+              `- **Updated:** ${new Date(feat.updatedAt).toLocaleString()}`,
+            );
             markdown.push(`- **Title:** ${feat.title}`);
             markdown.push(`- **Content size:** ${feat.contentLength} bytes`);
             markdown.push("");
@@ -985,7 +991,9 @@ export async function startMcpServer(): Promise<void> {
 
           for (const branch of branches) {
             const confidence = (branch.topConfidence * 100).toFixed(0);
-            const lastUpdated = new Date(branch.lastUpdated).toLocaleDateString();
+            const lastUpdated = new Date(
+              branch.lastUpdated,
+            ).toLocaleDateString();
             markdown.push(
               `| **${branch.branch}** | ${branch.feature} | ${branch.domain} | ${branch.factCount} | ${confidence}% | ${lastUpdated} |`,
             );
@@ -999,8 +1007,12 @@ export async function startMcpServer(): Promise<void> {
             markdown.push(`### ${branch.branch} (${branch.feature})`);
             markdown.push(`- **Domain:** ${branch.domain}`);
             markdown.push(`- **Facts stored:** ${branch.factCount}`);
-            markdown.push(`- **Top confidence:** ${(branch.topConfidence * 100).toFixed(0)}%`);
-            markdown.push(`- **Last updated:** ${new Date(branch.lastUpdated).toLocaleString()}`);
+            markdown.push(
+              `- **Top confidence:** ${(branch.topConfidence * 100).toFixed(0)}%`,
+            );
+            markdown.push(
+              `- **Last updated:** ${new Date(branch.lastUpdated).toLocaleString()}`,
+            );
             markdown.push("");
           }
         }

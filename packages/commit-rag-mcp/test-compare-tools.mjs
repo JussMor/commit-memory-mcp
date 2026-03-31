@@ -1,4 +1,4 @@
-import { getFeatureResume, buildContextPack, openDatabase } from "./dist/db/client.js";
+import { buildContextPack, getFeatureResume, openDatabase } from "./dist/db/client.js";
 
 const dbPath =
   "/Users/jussmor/Developer/maxwellclinic/EverBetter-Pro/.commit-rag.db";
