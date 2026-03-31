@@ -16,12 +16,12 @@ Replace legacy commit-only tooling with a worktree-aware PR intelligence MCP foc
 
 - [x] Foundation schema/types for PR + worktree session support
 - [x] GitHub PR ingest service (description/comments/reviews)
-- [ ] Decision promotion pipeline (Decision/Blocker extraction)
+- [x] Decision promotion pipeline (Decision/Blocker extraction)
 - [x] Worktree discovery and session sync
 - [x] MCP breaking-change tool migration (remove old tools, add new tools)
 - [ ] CLI sync commands for pre-plan workflows
 - [ ] Search/ranking updates for author + intent context
-- [ ] Update all .github docs for new tool contract
+- [x] Update all .github docs for new tool contract
 - [ ] Update root docs (README, SETUP) with migration and workflow
 
 ## Conventional Commit Plan
@@ -31,7 +31,7 @@ Replace legacy commit-only tooling with a worktree-aware PR intelligence MCP foc
 - [x] feat(mcp): replace legacy tools with author-intent and pre-plan sync tools
 - [x] feat(worktree): add multi-worktree session discovery and resume briefs
 - [ ] feat(search): add hybrid ranking across commits and promoted pr decisions
-- [ ] docs(github): update all .github docs to new tool contract
+- [x] docs(github): update all .github docs to new tool contract
 - [ ] docs(setup): add sync-before-plan workflow and migration guide
 - [ ] chore(tracking): maintain implementation tracker
 
