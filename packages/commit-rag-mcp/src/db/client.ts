@@ -559,11 +559,13 @@ export function buildContextPack(
   },
 ): ContextPackRecord[] {
   const taskType = options.taskType ?? "general";
+  const GLOBAL_BRANCH = "main";
 
   function runQuery(params: {
     includeDomain: boolean;
     includeFeature: boolean;
     includeBranch: boolean;
+    forcedBranch?: string;
   }): ContextPackRecord[] {
     const clauses: string[] = [];
     const values: Array<string | number> = [taskType];
@@ -576,7 +578,10 @@ export function buildContextPack(
       clauses.push("scope_feature = ?");
       values.push(options.feature);
     }
-    if (params.includeBranch && options.branch) {
+    if (params.forcedBranch) {
+      clauses.push("scope_branch = ?");
+      values.push(params.forcedBranch);
+    } else if (params.includeBranch && options.branch) {
       clauses.push("scope_branch = ?");
       values.push(options.branch);
     }
@@ -643,29 +648,77 @@ export function buildContextPack(
     }));
   }
 
-  const strictRows = runQuery({
-    includeDomain: true,
-    includeFeature: true,
-    includeBranch: true,
-  });
-  if (strictRows.length > 0) {
-    return strictRows;
+  const seenIds = new Set<string>();
+  const pack: ContextPackRecord[] = [];
+  const addRows = (rows: ContextPackRecord[]) => {
+    for (const row of rows) {
+      if (pack.length >= options.limit) {
+        return;
+      }
+      if (seenIds.has(row.id)) {
+        continue;
+      }
+      seenIds.add(row.id);
+      pack.push(row);
+    }
+  };
+
+  // 1) Main branch domain context is the durable source-of-truth baseline.
+  if (pack.length < options.limit) {
+    addRows(
+      runQuery({
+        includeDomain: true,
+        includeFeature: false,
+        includeBranch: false,
+        forcedBranch: GLOBAL_BRANCH,
+      }),
+    );
   }
 
-  const broadRows = runQuery({
-    includeDomain: true,
-    includeFeature: false,
-    includeBranch: false,
-  });
-  if (broadRows.length > 0) {
-    return broadRows;
+  // 2) Main branch global context fills any remaining baseline slots.
+  if (pack.length < options.limit) {
+    addRows(
+      runQuery({
+        includeDomain: false,
+        includeFeature: false,
+        includeBranch: false,
+        forcedBranch: GLOBAL_BRANCH,
+      }),
+    );
   }
 
-  return runQuery({
-    includeDomain: false,
-    includeFeature: false,
-    includeBranch: false,
-  });
+  // 3) Branch-local feature context overlays main for active, in-flight work.
+  addRows(
+    runQuery({
+      includeDomain: true,
+      includeFeature: true,
+      includeBranch: true,
+    }),
+  );
+
+  // 4) Domain-wide branch context provides additional short-lived signal.
+  if (pack.length < options.limit) {
+    addRows(
+      runQuery({
+        includeDomain: true,
+        includeFeature: false,
+        includeBranch: false,
+      }),
+    );
+  }
+
+  // 5) Final safety net from all promoted context.
+  if (pack.length < options.limit) {
+    addRows(
+      runQuery({
+        includeDomain: false,
+        includeFeature: false,
+        includeBranch: false,
+      }),
+    );
+  }
+
+  return pack;
 }
 
 export function archiveFeatureContext(

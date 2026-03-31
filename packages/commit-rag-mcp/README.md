@@ -108,7 +108,8 @@ build_context_pack({
 ```
 
 Use this before invoking a coding subagent to keep prompts small and focused.
-If no rows are found in strict scope, the server now falls back automatically to broader scope levels.
+The pack is assembled main-first: promoted facts on `main` are treated as baseline truth, then branch/feature facts are added as in-flight overlay.
+If no rows are found in strict scope, the server falls back automatically to broader scope levels.
 
 Important: if you provide `domain`/`feature`/`branch` tags in `build_context_pack`, use the same tags during `sync_pr_context` for best precision.
 
