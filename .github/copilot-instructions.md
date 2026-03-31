@@ -19,6 +19,8 @@ The active agent is optimized for async team handoffs and feature resume workflo
 - `get_main_branch_overnight_brief`
 - `resume_feature_session_brief`
 - `pre_plan_sync_brief`
+- `learn_feature`
+- `sync_feature_knowledge`
 
 ## Removed Tools (Breaking Change)
 
