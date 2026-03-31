@@ -204,7 +204,10 @@ export function touchIndexState(db: RagDatabase): void {
   ).run(now);
 }
 
-export function upsertPullRequest(db: RagDatabase, pr: PullRequestRecord): void {
+export function upsertPullRequest(
+  db: RagDatabase,
+  pr: PullRequestRecord,
+): void {
   db.prepare(
     `
       INSERT INTO prs (
@@ -407,10 +410,5 @@ export function upsertWorktreeSession(
         base_branch = excluded.base_branch,
         last_synced_at = excluded.last_synced_at
     `,
-  ).run(
-    session.path,
-    session.branch,
-    session.baseBranch,
-    session.lastSyncedAt,
-  );
+  ).run(session.path, session.branch, session.baseBranch, session.lastSyncedAt);
 }
