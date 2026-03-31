@@ -14,6 +14,9 @@ This package helps agents answer:
 ## Current MCP tools
 
 - `sync_pr_context`
+- `build_context_pack`
+- `promote_context_facts`
+- `archive_feature_context`
 - `list_active_worktrees`
 - `who_changed_this`
 - `why_was_this_changed`
@@ -71,6 +74,10 @@ node dist/mcp/server.js
 sync_pr_context({
   owner: "MaxwellClinic-Development",
   repo: "EverBetter-Pro",
+  domain: "billing",
+  feature: "invoice-retry",
+  branch: "feat/invoice-retry",
+  taskType: "planning",
   limit: 20
 })
 ```
@@ -86,6 +93,44 @@ list_active_worktrees({
 ```
 
 Use this when your team works on multiple features in parallel and wants session-aware context.
+
+### Build a scoped context pack
+
+```text
+build_context_pack({
+  domain: "billing",
+  feature: "invoice-retry",
+  branch: "feat/invoice-retry",
+  taskType: "coding",
+  includeDraft: false,
+  limit: 12
+})
+```
+
+Use this before invoking a coding subagent to keep prompts small and focused.
+
+### Promote draft facts after review
+
+```text
+promote_context_facts({
+  domain: "billing",
+  feature: "invoice-retry",
+  branch: "feat/invoice-retry"
+})
+```
+
+Use this when discussion outcomes are approved and should become durable context.
+
+### Archive completed feature context
+
+```text
+archive_feature_context({
+  domain: "billing",
+  feature: "invoice-retry"
+})
+```
+
+Use this after merge/closure to prevent active context bloat.
 
 ### Find ownership for a file
 
@@ -147,6 +192,17 @@ pre_plan_sync_brief({
 ```
 
 Use this as the default entrypoint for async team planning.
+
+## Multi-session git worktree flow
+
+For parallel AI coding sessions:
+
+1. Create one git worktree per feature branch.
+2. Use `list_active_worktrees` to enumerate active sessions.
+3. Use `resume_feature_session_brief` per worktree to check divergence and overlap risks.
+4. Generate a worktree-specific `build_context_pack` and hand it to the target subagent.
+
+This pattern avoids one giant shared context and scales better as features grow.
 
 ## Data model overview
 

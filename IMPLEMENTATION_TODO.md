@@ -20,7 +20,7 @@ Replace legacy commit-only tooling with a worktree-aware PR intelligence MCP foc
 - [x] Worktree discovery and session sync
 - [x] MCP breaking-change tool migration (remove old tools, add new tools)
 - [ ] CLI sync commands for pre-plan workflows
-- [ ] Search/ranking updates for author + intent context
+- [x] Search/ranking updates for author + intent context
 - [x] Update all .github docs for new tool contract
 - [~] Update root docs (README, SETUP) with migration and workflow
 
@@ -30,7 +30,7 @@ Replace legacy commit-only tooling with a worktree-aware PR intelligence MCP foc
 - [x] feat(ingest): add github pr description/comments/reviews sync pipeline
 - [x] feat(mcp): replace legacy tools with author-intent and pre-plan sync tools
 - [x] feat(worktree): add multi-worktree session discovery and resume briefs
-- [ ] feat(search): add hybrid ranking across commits and promoted pr decisions
+- [x] feat(search): add hybrid ranking across commits and promoted pr decisions
 - [x] docs(github): update all .github docs to new tool contract
 - [~] docs(setup): add sync-before-plan workflow and migration guide
 - [ ] chore(tracking): maintain implementation tracker
@@ -39,4 +39,4 @@ Replace legacy commit-only tooling with a worktree-aware PR intelligence MCP foc
 
 - Old tools will be removed (breaking change) once replacement tools are wired.
 - PR description is canonical source of "why". Comments are discussion until promoted as decisions.
-- README files were updated; SETUP.md still needs migration and sync-before-plan alignment.
+- README files include scoped-context and git-worktree multi-session flow; SETUP.md still needs migration and sync-before-plan alignment.

@@ -22,6 +22,9 @@ Instead of relying only on commit search, the current system combines:
 ## Current MCP tools
 
 - `sync_pr_context`
+- `build_context_pack`
+- `promote_context_facts`
+- `archive_feature_context`
 - `list_active_worktrees`
 - `who_changed_this`
 - `why_was_this_changed`
@@ -90,6 +93,31 @@ Or invoke the tool directly through MCP.
 2. Review blocker-level decisions before making code changes.
 3. Check `resume_feature_session_brief` after rebases or major merges.
 4. Keep PR descriptions updated with final decisions from review threads.
+
+## Context partition flow
+
+To avoid oversized prompts as features grow, keep changing context in scoped partitions:
+
+1. Sync context with `sync_pr_context` using domain/feature/branch/task metadata.
+2. Keep non-final discussion as `draft` facts.
+3. Promote approved facts with `promote_context_facts`.
+4. Build small task-focused packs using `build_context_pack`.
+5. Archive completed feature context with `archive_feature_context`.
+
+This keeps agents thin and gives subagents only the context slice they need.
+
+## Git worktree for multiple AI coding sessions
+
+`git worktree` lets your team run parallel AI coding sessions without branch collisions.
+
+Typical pattern:
+
+1. Create one worktree per feature/session.
+2. Run `list_active_worktrees` to discover all active sessions.
+3. Run `resume_feature_session_brief` inside the target worktree.
+4. Run `build_context_pack` for that feature/task before handing work to a subagent.
+
+This allows multiple subagents to work concurrently with scoped context instead of one large global prompt.
 
 ## Use cases
 
@@ -188,6 +216,20 @@ You get:
 - branch ahead/behind counts
 - overlap files
 - recommended first actions
+
+### 7. Build a small context pack for a subagent
+
+Problem:
+Feature knowledge is too large for one prompt and you need a focused pack for a coding subagent.
+
+Use:
+
+```text
+Run build_context_pack with domain billing, feature invoice-retry, branch feat/invoice-retry, taskType coding, limit 12
+```
+
+Outcome:
+You get a ranked, bounded context set so the subagent receives only relevant facts.
 
 ## Architecture
 
