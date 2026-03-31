@@ -11,7 +11,13 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { openDatabase, upsertWorktreeSession } from "../db/client.js";
+import {
+  archiveFeatureContext,
+  buildContextPack,
+  openDatabase,
+  promoteContextFacts,
+  upsertWorktreeSession,
+} from "../db/client.js";
 import {
   commitDetails,
   latestCommitForFile,
@@ -135,9 +141,58 @@ export async function startMcpServer(): Promise<void> {
               type: "array",
               items: { type: "number" },
             },
+            domain: { type: "string" },
+            feature: { type: "string" },
+            branch: { type: "string" },
+            taskType: { type: "string" },
             limit: { type: "number" },
           },
           required: ["owner", "repo"],
+        },
+      },
+      {
+        name: "build_context_pack",
+        description:
+          "Build a scoped context pack for a task/domain/feature/branch to keep agent prompts small.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string" },
+            feature: { type: "string" },
+            branch: { type: "string" },
+            taskType: { type: "string" },
+            includeDraft: { type: "boolean" },
+            limit: { type: "number" },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "promote_context_facts",
+        description:
+          "Promote scoped draft facts into durable promoted context.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string" },
+            feature: { type: "string" },
+            branch: { type: "string" },
+            sourceType: { type: "string" },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "archive_feature_context",
+        description:
+          "Archive all active facts for a domain/feature once work is complete.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string" },
+            feature: { type: "string" },
+          },
+          required: ["domain", "feature"],
         },
       },
       {
@@ -252,6 +307,10 @@ export async function startMcpServer(): Promise<void> {
       const limit = Number(
         (request.params.arguments?.limit as number | undefined) ?? 25,
       );
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const feature = String(request.params.arguments?.feature ?? "").trim();
+      const branch = String(request.params.arguments?.branch ?? "").trim();
+      const taskType = String(request.params.arguments?.taskType ?? "").trim();
 
       const summary = await syncPullRequestContext({
         repoPath,
@@ -260,11 +319,102 @@ export async function startMcpServer(): Promise<void> {
         repoName: repo,
         prNumbers,
         limit,
+        domain: domain || undefined,
+        feature: feature || undefined,
+        branch: branch || undefined,
+        taskType: taskType || undefined,
       });
 
       return {
         content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
       };
+    }
+
+    if (request.params.name === "build_context_pack") {
+      const limit = Number(
+        (request.params.arguments?.limit as number | undefined) ?? 20,
+      );
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const feature = String(request.params.arguments?.feature ?? "").trim();
+      const branch = String(request.params.arguments?.branch ?? "").trim();
+      const taskType =
+        String(request.params.arguments?.taskType ?? "").trim() || "general";
+      const includeDraft = Boolean(request.params.arguments?.includeDraft);
+
+      const db = openDatabase(dbPath);
+      try {
+        const pack = buildContextPack(db, {
+          domain: domain || undefined,
+          feature: feature || undefined,
+          branch: branch || undefined,
+          taskType,
+          includeDraft,
+          limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
+        });
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(pack, null, 2) }],
+        };
+      } finally {
+        db.close();
+      }
+    }
+
+    if (request.params.name === "promote_context_facts") {
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const feature = String(request.params.arguments?.feature ?? "").trim();
+      const branch = String(request.params.arguments?.branch ?? "").trim();
+      const sourceType =
+        String(request.params.arguments?.sourceType ?? "").trim();
+
+      const db = openDatabase(dbPath);
+      try {
+        const promotedCount = promoteContextFacts(db, {
+          domain: domain || undefined,
+          feature: feature || undefined,
+          branch: branch || undefined,
+          sourceType: sourceType || undefined,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ promotedCount }, null, 2),
+            },
+          ],
+        };
+      } finally {
+        db.close();
+      }
+    }
+
+    if (request.params.name === "archive_feature_context") {
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const feature = String(request.params.arguments?.feature ?? "").trim();
+      if (!domain || !feature) {
+        return {
+          content: [{ type: "text", text: "domain and feature are required" }],
+          isError: true,
+        };
+      }
+
+      const db = openDatabase(dbPath);
+      try {
+        const archivedCount = archiveFeatureContext(db, {
+          domain,
+          feature,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ archivedCount }, null, 2),
+            },
+          ],
+        };
+      } finally {
+        db.close();
+      }
     }
 
     if (request.params.name === "list_active_worktrees") {

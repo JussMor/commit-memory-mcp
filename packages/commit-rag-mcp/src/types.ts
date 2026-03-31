@@ -93,3 +93,39 @@ export type WorktreeSessionRecord = {
   lastSyncedAt: string;
   baseBranch: string;
 };
+
+export type ContextFactStatus = "draft" | "promoted" | "archived";
+
+export type ContextFactRecord = {
+  id: string;
+  sourceType: string;
+  sourceRef: string;
+  domain: string;
+  feature: string;
+  branch: string;
+  taskType: string;
+  title: string;
+  content: string;
+  priority: number;
+  confidence: number;
+  status: ContextFactStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ContextPackRecord = {
+  id: string;
+  sourceType: string;
+  sourceRef: string;
+  title: string;
+  content: string;
+  domain: string;
+  feature: string;
+  branch: string;
+  taskType: string;
+  priority: number;
+  confidence: number;
+  score: number;
+  status: ContextFactStatus;
+  updatedAt: string;
+};

@@ -6,6 +6,7 @@ import {
   replacePullRequestDecisions,
   replacePullRequestReviews,
   touchPullRequestSyncState,
+  upsertContextFact,
   upsertPullRequest,
 } from "../db/client.js";
 import type {
@@ -278,6 +279,10 @@ export async function syncPullRequestContext(options: {
   repoName: string;
   prNumbers?: number[];
   limit?: number;
+  domain?: string;
+  feature?: string;
+  branch?: string;
+  taskType?: string;
 }): Promise<PullRequestSyncSummary> {
   const repoPath = path.resolve(options.repoPath);
   const dbPath = path.resolve(options.dbPath);
@@ -332,6 +337,49 @@ export async function syncPullRequestContext(options: {
         parsed.pr.number,
         parsed.decisions,
       );
+
+      const scopeDomain = (options.domain ?? options.repoName).trim();
+      const scopeFeature =
+        (options.feature ?? `pr-${parsed.pr.number}`).trim() ||
+        `pr-${parsed.pr.number}`;
+      const scopeBranch = (options.branch ?? "main").trim() || "main";
+      const taskType = (options.taskType ?? "planning").trim() || "planning";
+
+      upsertContextFact(db, {
+        id: `pr:${options.repoOwner}/${options.repoName}#${parsed.pr.number}:description`,
+        sourceType: "pr_description",
+        sourceRef: `${options.repoOwner}/${options.repoName}#${parsed.pr.number}`,
+        domain: scopeDomain,
+        feature: scopeFeature,
+        branch: scopeBranch,
+        taskType,
+        title: parsed.pr.title,
+        content: parsed.pr.body,
+        priority: 0.85,
+        confidence: 0.9,
+        status: "promoted",
+        createdAt: parsed.pr.createdAt,
+        updatedAt: parsed.pr.updatedAt,
+      });
+
+      for (const decision of parsed.decisions) {
+        upsertContextFact(db, {
+          id: `decision:${options.repoOwner}/${options.repoName}#${parsed.pr.number}:${decision.id}`,
+          sourceType: `pr_${decision.source}`,
+          sourceRef: `${options.repoOwner}/${options.repoName}#${parsed.pr.number}`,
+          domain: scopeDomain,
+          feature: scopeFeature,
+          branch: scopeBranch,
+          taskType,
+          title: `Decision ${parsed.pr.number} (${decision.source})`,
+          content: decision.summary,
+          priority: decision.severity === "blocker" ? 1 : 0.75,
+          confidence: 0.8,
+          status: decision.source === "description" ? "promoted" : "draft",
+          createdAt: decision.createdAt,
+          updatedAt: decision.createdAt,
+        });
+      }
 
       syncedPrs += 1;
       syncedComments += parsed.comments.length;

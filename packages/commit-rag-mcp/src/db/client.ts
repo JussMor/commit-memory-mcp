@@ -4,6 +4,8 @@ import path from "node:path";
 import { load } from "sqlite-vec";
 import type {
   CommitChunk,
+  ContextFactRecord,
+  ContextPackRecord,
   PullRequestCommentRecord,
   PullRequestDecisionRecord,
   PullRequestRecord,
@@ -121,6 +123,44 @@ export function openDatabase(dbPath: string): RagDatabase {
       branch TEXT NOT NULL,
       base_branch TEXT NOT NULL,
       last_synced_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS context_facts (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      scope_domain TEXT NOT NULL,
+      scope_feature TEXT NOT NULL,
+      scope_branch TEXT NOT NULL,
+      scope_task_type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      priority REAL NOT NULL,
+      confidence REAL NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_context_scope
+      ON context_facts(scope_domain, scope_feature, scope_branch, scope_task_type, status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS context_fact_archive (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      scope_domain TEXT NOT NULL,
+      scope_feature TEXT NOT NULL,
+      scope_branch TEXT NOT NULL,
+      scope_task_type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      priority REAL NOT NULL,
+      confidence REAL NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT NOT NULL
     );
   `);
 
@@ -411,4 +451,246 @@ export function upsertWorktreeSession(
         last_synced_at = excluded.last_synced_at
     `,
   ).run(session.path, session.branch, session.baseBranch, session.lastSyncedAt);
+}
+
+export function upsertContextFact(
+  db: RagDatabase,
+  fact: ContextFactRecord,
+): void {
+  db.prepare(
+    `
+      INSERT INTO context_facts (
+        id,
+        source_type,
+        source_ref,
+        scope_domain,
+        scope_feature,
+        scope_branch,
+        scope_task_type,
+        title,
+        content,
+        priority,
+        confidence,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        source_type = excluded.source_type,
+        source_ref = excluded.source_ref,
+        scope_domain = excluded.scope_domain,
+        scope_feature = excluded.scope_feature,
+        scope_branch = excluded.scope_branch,
+        scope_task_type = excluded.scope_task_type,
+        title = excluded.title,
+        content = excluded.content,
+        priority = excluded.priority,
+        confidence = excluded.confidence,
+        status = excluded.status,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    fact.id,
+    fact.sourceType,
+    fact.sourceRef,
+    fact.domain,
+    fact.feature,
+    fact.branch,
+    fact.taskType,
+    fact.title,
+    fact.content,
+    fact.priority,
+    fact.confidence,
+    fact.status,
+    fact.createdAt,
+    fact.updatedAt,
+  );
+}
+
+export function promoteContextFacts(
+  db: RagDatabase,
+  options: {
+    domain?: string;
+    feature?: string;
+    branch?: string;
+    sourceType?: string;
+  },
+): number {
+  const clauses: string[] = ["status = 'draft'"];
+  const params: Array<string> = [];
+
+  if (options.domain) {
+    clauses.push("scope_domain = ?");
+    params.push(options.domain);
+  }
+  if (options.feature) {
+    clauses.push("scope_feature = ?");
+    params.push(options.feature);
+  }
+  if (options.branch) {
+    clauses.push("scope_branch = ?");
+    params.push(options.branch);
+  }
+  if (options.sourceType) {
+    clauses.push("source_type = ?");
+    params.push(options.sourceType);
+  }
+
+  const sql = `
+    UPDATE context_facts
+    SET status = 'promoted', updated_at = ?
+    WHERE ${clauses.join(" AND ")}
+  `;
+  const now = new Date().toISOString();
+  const result = db.prepare(sql).run(now, ...params);
+  return Number(result.changes ?? 0);
+}
+
+export function buildContextPack(
+  db: RagDatabase,
+  options: {
+    domain?: string;
+    feature?: string;
+    branch?: string;
+    taskType?: string;
+    includeDraft?: boolean;
+    limit: number;
+  },
+): ContextPackRecord[] {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (options.domain) {
+    clauses.push("scope_domain = ?");
+    params.push(options.domain);
+  }
+  if (options.feature) {
+    clauses.push("scope_feature = ?");
+    params.push(options.feature);
+  }
+  if (options.branch) {
+    clauses.push("scope_branch = ?");
+    params.push(options.branch);
+  }
+  if (options.taskType) {
+    clauses.push("scope_task_type IN (?, 'general')");
+    params.push(options.taskType);
+  }
+
+  if (options.includeDraft) {
+    clauses.push("status IN ('promoted', 'draft')");
+  } else {
+    clauses.push("status = 'promoted'");
+  }
+
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  const sql = `
+    SELECT
+      id,
+      source_type,
+      source_ref,
+      title,
+      content,
+      scope_domain,
+      scope_feature,
+      scope_branch,
+      scope_task_type,
+      priority,
+      confidence,
+      status,
+      updated_at,
+      ((priority * 0.45) + (confidence * 0.35) +
+        CASE
+          WHEN scope_task_type = ? THEN 0.20
+          WHEN scope_task_type = 'general' THEN 0.10
+          ELSE 0.0
+        END) AS score
+    FROM context_facts
+    ${where}
+    ORDER BY score DESC, updated_at DESC
+    LIMIT ?
+  `;
+
+  const taskType = options.taskType ?? "general";
+  const rows = db.prepare(sql).all(taskType, ...params, options.limit) as Array<
+    Record<string, unknown>
+  >;
+
+  return rows.map((row) => ({
+    id: String(row.id ?? ""),
+    sourceType: String(row.source_type ?? ""),
+    sourceRef: String(row.source_ref ?? ""),
+    title: String(row.title ?? ""),
+    content: String(row.content ?? ""),
+    domain: String(row.scope_domain ?? ""),
+    feature: String(row.scope_feature ?? ""),
+    branch: String(row.scope_branch ?? ""),
+    taskType: String(row.scope_task_type ?? ""),
+    priority: Number(row.priority ?? 0),
+    confidence: Number(row.confidence ?? 0),
+    score: Number(row.score ?? 0),
+    status: String(row.status ?? "promoted") as ContextPackRecord["status"],
+    updatedAt: String(row.updated_at ?? ""),
+  }));
+}
+
+export function archiveFeatureContext(
+  db: RagDatabase,
+  options: { domain: string; feature: string },
+): number {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    db.prepare(
+      `
+        INSERT OR REPLACE INTO context_fact_archive (
+          id,
+          source_type,
+          source_ref,
+          scope_domain,
+          scope_feature,
+          scope_branch,
+          scope_task_type,
+          title,
+          content,
+          priority,
+          confidence,
+          status,
+          created_at,
+          updated_at,
+          archived_at
+        )
+        SELECT
+          id,
+          source_type,
+          source_ref,
+          scope_domain,
+          scope_feature,
+          scope_branch,
+          scope_task_type,
+          title,
+          content,
+          priority,
+          confidence,
+          'archived',
+          created_at,
+          updated_at,
+          ?
+        FROM context_facts
+        WHERE scope_domain = ? AND scope_feature = ?
+      `,
+    ).run(now, options.domain, options.feature);
+
+    return db
+      .prepare(
+        `
+          DELETE FROM context_facts
+          WHERE scope_domain = ? AND scope_feature = ?
+        `,
+      )
+      .run(options.domain, options.feature);
+  });
+
+  const result = tx();
+  return Number(result.changes ?? 0);
 }
