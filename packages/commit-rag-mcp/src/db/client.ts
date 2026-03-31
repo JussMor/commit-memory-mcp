@@ -22,6 +22,11 @@ export function openDatabase(dbPath: string): RagDatabase {
   const db = new Database(resolved);
   load(db);
 
+  // Enable WAL mode and ensure data is persisted to disk
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("foreign_keys = ON");
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS commits (
       sha TEXT PRIMARY KEY,
@@ -547,6 +552,15 @@ export function promoteContextFacts(
   return Number(result.changes ?? 0);
 }
 
+function summarizePRMetadata(fact: ContextPackRecord): string {
+  // Extract key info from PR metadata to keep it concise
+  if (fact.sourceType.startsWith("pr_")) {
+    const lines = fact.content.split("\n").slice(0, 2).join(" ");
+    return `[${fact.sourceRef}] ${fact.title} — ${lines.substring(0, 100)}`;
+  }
+  return fact.content;
+}
+
 export function buildContextPack(
   db: RagDatabase,
   options: {
@@ -556,8 +570,15 @@ export function buildContextPack(
     taskType?: string;
     includeDraft?: boolean;
     limit: number;
+    forceRefresh?: boolean;
+    summarizePR?: boolean;
   },
-): ContextPackRecord[] {
+): {
+  learnedFeature: ContextPackRecord[];
+  branchContext: ContextPackRecord[];
+  prMetadata: ContextPackRecord[];
+  allContext: ContextPackRecord[];
+} {
   const taskType = options.taskType ?? "general";
   const GLOBAL_BRANCH = "main";
 
@@ -663,6 +684,55 @@ export function buildContextPack(
     }
   };
 
+  // PRIORITY 0) Learned feature knowledge is always included first when available.
+  // This ensures feature knowledge isn't lost behind PR metadata.
+  if (!options.feature && !options.branch) {
+    // Auto-discover recently learned features (source_type='feature-agent')
+    const learnedFacts = (
+      db.prepare(`
+        SELECT
+          id,
+          source_type,
+          source_ref,
+          title,
+          content,
+          scope_domain,
+          scope_feature,
+          scope_branch,
+          scope_task_type,
+          priority,
+          confidence,
+          status,
+          updated_at,
+          ((priority * 0.40) + (confidence * 0.30) + 0.25) AS score
+        FROM context_facts
+        WHERE source_type = 'feature-agent' AND status = 'promoted'
+        ORDER BY updated_at DESC, priority DESC
+        LIMIT ?
+      `) as any
+    ).all(Math.max(3, Math.floor(options.limit * 0.2))) as Array<
+      Record<string, unknown>
+    >;
+
+    const learnedRows = learnedFacts.map((row) => ({
+      id: String(row.id ?? ""),
+      sourceType: String(row.source_type ?? ""),
+      sourceRef: String(row.source_ref ?? ""),
+      title: String(row.title ?? ""),
+      content: String(row.content ?? ""),
+      domain: String(row.scope_domain ?? ""),
+      feature: String(row.scope_feature ?? ""),
+      branch: String(row.scope_branch ?? ""),
+      taskType: String(row.scope_task_type ?? ""),
+      priority: Number(row.priority ?? 0),
+      confidence: Number(row.confidence ?? 0),
+      score: Number(row.score ?? 0),
+      status: String(row.status ?? "promoted") as ContextPackRecord["status"],
+      updatedAt: String(row.updated_at ?? ""),
+    }));
+    addRows(learnedRows);
+  }
+
   // 1) Main branch domain context is the durable source-of-truth baseline.
   if (pack.length < options.limit) {
     addRows(
@@ -718,7 +788,44 @@ export function buildContextPack(
     );
   }
 
-  return pack;
+  // Categorize results and apply summarization if requested
+  const learnedFeature: ContextPackRecord[] = [];
+  const branchContext: ContextPackRecord[] = [];
+  const prMetadata: ContextPackRecord[] = [];
+
+  for (const item of pack) {
+    if (item.sourceType === "feature-agent") {
+      learnedFeature.push(item);
+    } else if (item.sourceType.startsWith("pr_")) {
+      if (options.summarizePR) {
+        prMetadata.push({
+          ...item,
+          content: summarizePRMetadata(item),
+        });
+      } else {
+        prMetadata.push(item);
+      }
+    } else if (item.branch && item.branch !== "main") {
+      branchContext.push(item);
+    } else {
+      // Fallback for other context types
+      if (options.summarizePR && item.sourceType.startsWith("pr_")) {
+        branchContext.push({
+          ...item,
+          content: summarizePRMetadata(item),
+        });
+      } else {
+        branchContext.push(item);
+      }
+    }
+  }
+
+  return {
+    learnedFeature,
+    branchContext,
+    prMetadata,
+    allContext: pack,
+  };
 }
 
 export function archiveFeatureContext(

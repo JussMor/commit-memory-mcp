@@ -267,7 +267,7 @@ export async function startMcpServer(): Promise<void> {
       {
         name: "build_context_pack",
         description:
-          "Build a scoped context pack for a task/domain/feature/branch to keep agent prompts small.",
+          "Build a scoped context pack for a task/domain/feature/branch. Returns learned feature knowledge, branch context, and PR metadata separately.",
         inputSchema: {
           type: "object",
           properties: {
@@ -277,6 +277,15 @@ export async function startMcpServer(): Promise<void> {
             taskType: { type: "string" },
             includeDraft: { type: "boolean" },
             limit: { type: "number" },
+            forceRefresh: {
+              type: "boolean",
+              description: "Re-run learn_feature to update feature knowledge",
+            },
+            summarizePR: {
+              type: "boolean",
+              description:
+                "Return PR metadata as summaries instead of full content",
+            },
           },
           required: [],
         },
@@ -507,6 +516,8 @@ export async function startMcpServer(): Promise<void> {
       const taskType =
         String(request.params.arguments?.taskType ?? "").trim() || "general";
       const includeDraft = Boolean(request.params.arguments?.includeDraft);
+      const forceRefresh = Boolean(request.params.arguments?.forceRefresh);
+      const summarizePR = Boolean(request.params.arguments?.summarizePR);
 
       const db = openDatabase(dbPath);
       try {
@@ -517,6 +528,8 @@ export async function startMcpServer(): Promise<void> {
           taskType,
           includeDraft,
           limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
+          forceRefresh,
+          summarizePR,
         });
 
         return {
