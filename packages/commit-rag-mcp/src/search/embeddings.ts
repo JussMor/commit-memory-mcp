@@ -66,6 +66,33 @@ export async function embedText(text: string): Promise<number[]> {
   return normalize(payload.embedding);
 }
 
+export async function callOllamaLlm(prompt: string): Promise<string | null> {
+  const model = process.env.OLLAMA_CHAT_MODEL;
+  if (!model) {
+    return null;
+  }
+
+  const baseUrl = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
+  try {
+    const response = await fetch(`${baseUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false }),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as { response?: string };
+    return typeof payload.response === "string" && payload.response.trim()
+      ? payload.response.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getExpectedDimension(): number {
   return process.env.OLLAMA_EMBED_MODEL
     ? Number.parseInt(process.env.COMMIT_RAG_DIMENSION ?? "", 10) ||

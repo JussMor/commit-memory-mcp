@@ -240,6 +240,109 @@ export function mainBranchOvernightBrief(options: {
   };
 }
 
+export function extractFeatureBranchCommits(options: {
+  repoPath: string;
+  featureBranch: string;
+  baseBranch: string;
+  limit: number;
+}): {
+  featureName: string;
+  featureBranch: string;
+  baseBranch: string;
+  commits: Array<{
+    sha: string;
+    author: string;
+    date: string;
+    subject: string;
+    files: string[];
+  }>;
+  topFiles: Array<{ filePath: string; touchCount: number }>;
+  affectedModules: string[];
+} {
+  const repoPath = path.resolve(options.repoPath);
+  const featureName = options.featureBranch
+    .replace(/^feature\//, "")
+    .replace(/[^a-zA-Z0-9-_]/g, "-");
+  const limit = Math.max(1, options.limit);
+
+  let commitsRaw: string;
+  try {
+    commitsRaw = runGit(repoPath, [
+      "log",
+      `--format=%H%x1f%an%x1f%aI%x1f%s`,
+      `-n${limit}`,
+      `${options.baseBranch}..${options.featureBranch}`,
+    ]).trim();
+  } catch {
+    return {
+      featureName,
+      featureBranch: options.featureBranch,
+      baseBranch: options.baseBranch,
+      commits: [],
+      topFiles: [],
+      affectedModules: [],
+    };
+  }
+
+  if (!commitsRaw) {
+    return {
+      featureName,
+      featureBranch: options.featureBranch,
+      baseBranch: options.baseBranch,
+      commits: [],
+      topFiles: [],
+      affectedModules: [],
+    };
+  }
+
+  const fileCounts = new Map<string, number>();
+
+  const commits = commitsRaw.split("\n").map((line) => {
+    const [sha = "", author = "", date = "", subject = ""] = line.split("\x1f");
+    let files: string[] = [];
+    try {
+      const filesRaw = runGit(repoPath, [
+        "show",
+        "--name-only",
+        "--pretty=format:",
+        sha,
+      ]).trim();
+      files = filesRaw
+        .split("\n")
+        .map((f) => f.trim())
+        .filter(Boolean);
+    } catch {
+      // ignore per-commit failures
+    }
+    for (const f of files) {
+      fileCounts.set(f, (fileCounts.get(f) ?? 0) + 1);
+    }
+    return { sha, author, date, subject, files };
+  });
+
+  const topFiles = Array.from(fileCounts.entries())
+    .map(([filePath, touchCount]) => ({ filePath, touchCount }))
+    .sort((a, b) => b.touchCount - a.touchCount)
+    .slice(0, 15);
+
+  const moduleSet = new Set<string>();
+  for (const { filePath } of topFiles) {
+    const parts = filePath.split("/");
+    if (parts.length >= 2) {
+      moduleSet.add(parts.slice(0, 2).join("/"));
+    }
+  }
+
+  return {
+    featureName,
+    featureBranch: options.featureBranch,
+    baseBranch: options.baseBranch,
+    commits,
+    topFiles,
+    affectedModules: Array.from(moduleSet).slice(0, 10),
+  };
+}
+
 export function resumeFeatureSessionBrief(options: {
   worktreePath: string;
   baseBranch: string;

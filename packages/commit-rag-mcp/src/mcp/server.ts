@@ -16,11 +16,13 @@ import {
   buildContextPack,
   openDatabase,
   promoteContextFacts,
+  upsertContextFact,
   upsertWorktreeSession,
 } from "../db/client.js";
 import {
   commitDetails,
   explainPathActivity,
+  extractFeatureBranchCommits,
   latestCommitForFile,
   mainBranchOvernightBrief,
   resumeFeatureSessionBrief,
@@ -28,6 +30,11 @@ import {
 } from "../git/insights.js";
 import { listActiveWorktrees } from "../git/worktree.js";
 import { syncPullRequestContext } from "../pr/sync.js";
+import { callOllamaLlm } from "../search/embeddings.js";
+
+function normalizeFeatureName(branch: string): string {
+  return branch.replace(/^feature\//, "").replace(/[^a-zA-Z0-9-_]/g, "-");
+}
 
 function fetchRemote(repoPath: string): void {
   execFileSync("git", ["-C", repoPath, "fetch", "--all", "--prune"], {
@@ -382,6 +389,44 @@ export async function startMcpServer(): Promise<void> {
             baseBranch: { type: "string" },
           },
           required: [],
+        },
+      },
+      {
+        name: "learn_feature",
+        description:
+          "Save feature knowledge to the RAG DB. If agentContent is provided (recommended), it is stored directly as the feature's understanding — the agent should investigate the source code itself and pass its findings here. If agentContent is omitted, falls back to git-commit-based inference.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            featureBranch: {
+              type: "string",
+              description: "e.g. feature/messaging",
+            },
+            baseBranch: { type: "string" },
+            limit: { type: "number" },
+            agentContent: {
+              type: "string",
+              description:
+                "Plain-text description of what the feature does, written by the agent after reading actual source files. When provided, this becomes the stored knowledge (confidence 0.95) and git metadata is appended as supporting context.",
+            },
+          },
+          required: ["featureBranch"],
+        },
+      },
+      {
+        name: "sync_feature_knowledge",
+        description:
+          "Update the AI knowledge for a feature branch using new commits and PR decisions since the last sync. Bootstraps automatically if no prior knowledge exists.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            featureBranch: { type: "string" },
+            baseBranch: { type: "string" },
+            owner: { type: "string" },
+            repo: { type: "string" },
+            limit: { type: "number" },
+          },
+          required: ["featureBranch"],
         },
       },
       {
@@ -818,6 +863,380 @@ export async function startMcpServer(): Promise<void> {
 
       return {
         content: [{ type: "text", text: JSON.stringify(prePlan, null, 2) }],
+      };
+    }
+
+    if (request.params.name === "learn_feature") {
+      const featureBranch = String(
+        request.params.arguments?.featureBranch ?? "",
+      ).trim();
+      const baseBranch =
+        String(request.params.arguments?.baseBranch ?? "").trim() || "main";
+      const limit = Number(
+        (request.params.arguments?.limit as number | undefined) ?? 50,
+      );
+      const agentContent =
+        String(request.params.arguments?.agentContent ?? "").trim() || null;
+
+      if (!featureBranch) {
+        return {
+          content: [{ type: "text", text: "featureBranch is required" }],
+          isError: true,
+        };
+      }
+
+      const featureName = normalizeFeatureName(featureBranch);
+      const data = extractFeatureBranchCommits({
+        repoPath,
+        featureBranch,
+        baseBranch,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : 50,
+      });
+
+      const authors = [...new Set(data.commits.map((c) => c.author))].join(
+        ", ",
+      );
+      const now = new Date().toISOString();
+
+      let content: string;
+      let confidence: number;
+      let aiGenerated: boolean;
+
+      if (agentContent) {
+        // Agent investigated the source code directly — highest confidence.
+        // Append git metadata as supporting context.
+        const gitMeta = [
+          ``,
+          `--- Git metadata (${data.commits.length} commits, authors: ${authors || "unknown"}) ---`,
+          `Top files: ${
+            data.topFiles
+              .slice(0, 5)
+              .map((f) => f.filePath)
+              .join(", ") || "(none)"
+          }`,
+          `Top modules: ${data.affectedModules.slice(0, 4).join(", ") || "(none)"}`,
+        ].join("\n");
+        content = agentContent + gitMeta;
+        confidence = 0.95;
+        aiGenerated = true;
+      } else {
+        // Fallback: infer from git commits + optional Ollama synthesis.
+        const fileList = data.topFiles
+          .map((f) => `  - ${f.filePath} (touched ${f.touchCount}x)`)
+          .join("\n");
+        const commitList = data.commits
+          .slice(0, 20)
+          .map((c) => `  - ${c.subject} (${c.author})`)
+          .join("\n");
+
+        const prompt = [
+          `You are analyzing a Git feature branch called "${featureBranch}".`,
+          ``,
+          `Top changed files:`,
+          fileList || "  (none)",
+          ``,
+          `Commit history (most recent first):`,
+          commitList || "  (none)",
+          ``,
+          `Answer in 3-5 sentences:`,
+          `1. What does this feature do?`,
+          `2. What modules/areas of the codebase does it affect?`,
+          `3. What does it NOT do or what is explicitly out of scope?`,
+        ].join("\n");
+
+        const llmSummary = await callOllamaLlm(prompt);
+        const fallbackSummary = [
+          `Feature "${featureName}" spans ${data.commits.length} commit(s) by ${authors || "(unknown)"}.`,
+          `Top modules: ${data.affectedModules.slice(0, 4).join(", ") || "(unknown)"}.`,
+          `Top files: ${
+            data.topFiles
+              .slice(0, 3)
+              .map((f) => f.filePath)
+              .join(", ") || "(none)"
+          }.`,
+          `Commit subjects: ${data.commits
+            .slice(0, 5)
+            .map((c) => c.subject)
+            .join("; ")}.`,
+        ].join(" ");
+
+        content = llmSummary ?? fallbackSummary;
+        confidence = llmSummary ? 0.85 : 0.6;
+        aiGenerated = llmSummary !== null;
+      }
+
+      const db = openDatabase(dbPath);
+      try {
+        upsertContextFact(db, {
+          id: `feature-knowledge:${featureName}`,
+          sourceType: "feature-agent",
+          sourceRef: featureBranch,
+          domain: "",
+          feature: featureName,
+          branch: featureBranch,
+          taskType: "feature-knowledge",
+          title: `Feature knowledge: ${featureName}`,
+          content,
+          priority: 0.9,
+          confidence,
+          status: "promoted",
+          createdAt: now,
+          updatedAt: now,
+        });
+      } finally {
+        db.close();
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                featureName,
+                learned: content,
+                filesAnalyzed: data.topFiles.length,
+                commitsAnalyzed: data.commits.length,
+                agentProvided: agentContent !== null,
+                aiGenerated,
+                confidence,
+                savedAt: now,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    if (request.params.name === "sync_feature_knowledge") {
+      const featureBranch = String(
+        request.params.arguments?.featureBranch ?? "",
+      ).trim();
+      const baseBranch =
+        String(request.params.arguments?.baseBranch ?? "").trim() || "main";
+      const owner = String(request.params.arguments?.owner ?? "").trim();
+      const repo = String(request.params.arguments?.repo ?? "").trim();
+      const limit = Number(
+        (request.params.arguments?.limit as number | undefined) ?? 50,
+      );
+
+      if (!featureBranch) {
+        return {
+          content: [{ type: "text", text: "featureBranch is required" }],
+          isError: true,
+        };
+      }
+
+      const featureName = normalizeFeatureName(featureBranch);
+      const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 50;
+
+      // Load existing knowledge from DB
+      let existingKnowledge: string | null = null;
+      let existingUpdatedAt: string | null = null;
+      let existingCreatedAt: string | null = null;
+
+      const dbRead = openDatabase(dbPath);
+      try {
+        const existing = dbRead
+          .prepare(
+            "SELECT content, created_at, updated_at FROM context_facts WHERE id = ? LIMIT 1",
+          )
+          .get(`feature-knowledge:${featureName}`) as
+          | { content: string; created_at: string; updated_at: string }
+          | undefined;
+        existingKnowledge = existing?.content ?? null;
+        existingUpdatedAt = existing?.updated_at ?? null;
+        existingCreatedAt = existing?.created_at ?? null;
+      } finally {
+        dbRead.close();
+      }
+
+      // Bootstrap via learn_feature logic if no prior knowledge
+      if (!existingKnowledge) {
+        const bootData = extractFeatureBranchCommits({
+          repoPath,
+          featureBranch,
+          baseBranch,
+          limit: safeLimit,
+        });
+        const bootFileList = bootData.topFiles
+          .map((f) => `  - ${f.filePath} (touched ${f.touchCount}x)`)
+          .join("\n");
+        const bootCommitList = bootData.commits
+          .slice(0, 20)
+          .map((c) => `  - ${c.subject} (${c.author})`)
+          .join("\n");
+        const bootPrompt = [
+          `You are analyzing a Git feature branch called "${featureBranch}".`,
+          `Top changed files:\n${bootFileList || "  (none)"}`,
+          `Commit history:\n${bootCommitList || "  (none)"}`,
+          `Answer in 3-5 sentences: 1. What does this feature do? 2. What modules does it affect? 3. What is out of scope?`,
+        ].join("\n\n");
+        const bootLlm = await callOllamaLlm(bootPrompt);
+        existingKnowledge =
+          bootLlm ??
+          `Feature "${featureName}" has ${bootData.commits.length} commit(s). Top modules: ${
+            bootData.affectedModules.slice(0, 4).join(", ") || "(unknown)"
+          }.`;
+        const now = new Date().toISOString();
+        const dbBoot = openDatabase(dbPath);
+        try {
+          upsertContextFact(dbBoot, {
+            id: `feature-knowledge:${featureName}`,
+            sourceType: "feature-agent",
+            sourceRef: featureBranch,
+            domain: "",
+            feature: featureName,
+            branch: featureBranch,
+            taskType: "feature-knowledge",
+            title: `Feature knowledge: ${featureName}`,
+            content: existingKnowledge,
+            priority: 0.9,
+            confidence: bootLlm ? 0.85 : 0.6,
+            status: "promoted",
+            createdAt: now,
+            updatedAt: now,
+          });
+        } finally {
+          dbBoot.close();
+        }
+        existingUpdatedAt = now;
+        existingCreatedAt = now;
+      }
+
+      // Fetch remote and extract commits
+      fetchRemote(repoPath);
+      const data = extractFeatureBranchCommits({
+        repoPath,
+        featureBranch,
+        baseBranch,
+        limit: safeLimit,
+      });
+
+      // Only process commits newer than last sync
+      const newCommits = existingUpdatedAt
+        ? data.commits.filter((c) => c.date > (existingUpdatedAt as string))
+        : data.commits;
+
+      // Gather PR decisions for referenced PRs in new commits
+      const referencedPrNumbers = newCommits
+        .map((c) => detectReferencedPrNumber(c.subject))
+        .filter((n): n is number => n !== null);
+
+      let prDecisionsSummary = "";
+      if (referencedPrNumbers.length > 0) {
+        const dbPr = openDatabase(dbPath);
+        try {
+          const parts: string[] = [];
+          for (const prNum of referencedPrNumbers.slice(0, 5)) {
+            const { pr, decisions } = loadPullRequestContext(
+              dbPr,
+              prNum,
+              owner || undefined,
+              repo || undefined,
+            );
+            if (pr) {
+              parts.push(
+                `PR #${prNum} "${pr["title"]}": ${decisions
+                  .slice(0, 3)
+                  .map((d) => d["summary"])
+                  .join("; ")}`,
+              );
+            }
+          }
+          prDecisionsSummary = parts.join("\n");
+        } finally {
+          dbPr.close();
+        }
+      }
+
+      const newCommitList = newCommits
+        .slice(0, 20)
+        .map((c) => `  - ${c.subject} (${c.author})`)
+        .join("\n");
+
+      const updatePrompt = [
+        `You previously documented this feature:`,
+        `"${existingKnowledge}"`,
+        ``,
+        `New commits since last sync:`,
+        newCommitList || "  (no new commits)",
+        prDecisionsSummary ? `\nPR decisions:\n${prDecisionsSummary}` : "",
+        ``,
+        `Write an updated 3-5 sentence understanding of the feature. If nothing changed, return the previous text unchanged.`,
+      ].join("\n");
+
+      const updatedSummary =
+        newCommits.length > 0
+          ? ((await callOllamaLlm(updatePrompt)) ?? existingKnowledge)
+          : existingKnowledge;
+
+      const now = new Date().toISOString();
+      const dbWrite = openDatabase(dbPath);
+      try {
+        upsertContextFact(dbWrite, {
+          id: `feature-knowledge:${featureName}`,
+          sourceType: "feature-agent",
+          sourceRef: featureBranch,
+          domain: "",
+          feature: featureName,
+          branch: featureBranch,
+          taskType: "feature-knowledge",
+          title: `Feature knowledge: ${featureName}`,
+          content: updatedSummary,
+          priority: 0.9,
+          confidence: 0.85,
+          status: "promoted",
+          createdAt: existingCreatedAt ?? now,
+          updatedAt: now,
+        });
+
+        // Audit log row (status: draft — invisible to default build_context_pack)
+        if (newCommits.length > 0) {
+          const auditDate = now.split("T")[0] ?? now;
+          upsertContextFact(dbWrite, {
+            id: `feature-change-log:${featureName}:${auditDate}`,
+            sourceType: "feature-agent",
+            sourceRef: featureBranch,
+            domain: "",
+            feature: featureName,
+            branch: featureBranch,
+            taskType: "change-log",
+            title: `Change log: ${featureName} on ${auditDate}`,
+            content: `New commits: ${newCommits
+              .map((c) => c.subject)
+              .join("; ")}. ${prDecisionsSummary}`.trim(),
+            priority: 0.7,
+            confidence: 0.8,
+            status: "draft",
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      } finally {
+        dbWrite.close();
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                featureName,
+                previousKnowledge: existingKnowledge,
+                updatedKnowledge: updatedSummary,
+                newCommitsAnalyzed: newCommits.length,
+                totalCommitsInBranch: data.commits.length,
+                syncedAt: now,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     }
 
