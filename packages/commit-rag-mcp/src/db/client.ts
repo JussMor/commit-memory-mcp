@@ -558,34 +558,37 @@ export function buildContextPack(
     limit: number;
   },
 ): ContextPackRecord[] {
-  const clauses: string[] = [];
-  const params: Array<string | number> = [];
+  const taskType = options.taskType ?? "general";
 
-  if (options.domain) {
-    clauses.push("scope_domain = ?");
-    params.push(options.domain);
-  }
-  if (options.feature) {
-    clauses.push("scope_feature = ?");
-    params.push(options.feature);
-  }
-  if (options.branch) {
-    clauses.push("scope_branch = ?");
-    params.push(options.branch);
-  }
-  if (options.taskType) {
-    clauses.push("scope_task_type IN (?, 'general')");
-    params.push(options.taskType);
-  }
+  function runQuery(params: {
+    includeDomain: boolean;
+    includeFeature: boolean;
+    includeBranch: boolean;
+  }): ContextPackRecord[] {
+    const clauses: string[] = [];
+    const values: Array<string | number> = [taskType];
 
-  if (options.includeDraft) {
-    clauses.push("status IN ('promoted', 'draft')");
-  } else {
-    clauses.push("status = 'promoted'");
-  }
+    if (params.includeDomain && options.domain) {
+      clauses.push("scope_domain = ?");
+      values.push(options.domain);
+    }
+    if (params.includeFeature && options.feature) {
+      clauses.push("scope_feature = ?");
+      values.push(options.feature);
+    }
+    if (params.includeBranch && options.branch) {
+      clauses.push("scope_branch = ?");
+      values.push(options.branch);
+    }
 
-  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-  const sql = `
+    if (options.includeDraft) {
+      clauses.push("status IN ('promoted', 'draft')");
+    } else {
+      clauses.push("status = 'promoted'");
+    }
+
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const sql = `
     SELECT
       id,
       source_type,
@@ -600,10 +603,15 @@ export function buildContextPack(
       confidence,
       status,
       updated_at,
-      ((priority * 0.45) + (confidence * 0.35) +
+      ((priority * 0.40) + (confidence * 0.30) +
         CASE
-          WHEN scope_task_type = ? THEN 0.20
-          WHEN scope_task_type = 'general' THEN 0.10
+          WHEN scope_task_type = ? THEN 0.30
+          WHEN scope_task_type = 'general' THEN 0.15
+          ELSE 0.0
+        END +
+        CASE
+          WHEN source_type = 'pr_description' THEN 0.15
+          WHEN source_type LIKE 'pr_%' THEN 0.08
           ELSE 0.0
         END) AS score
     FROM context_facts
@@ -612,27 +620,52 @@ export function buildContextPack(
     LIMIT ?
   `;
 
-  const taskType = options.taskType ?? "general";
-  const rows = db.prepare(sql).all(taskType, ...params, options.limit) as Array<
-    Record<string, unknown>
-  >;
+    values.push(options.limit);
+    const rows = db.prepare(sql).all(...values) as Array<
+      Record<string, unknown>
+    >;
 
-  return rows.map((row) => ({
-    id: String(row.id ?? ""),
-    sourceType: String(row.source_type ?? ""),
-    sourceRef: String(row.source_ref ?? ""),
-    title: String(row.title ?? ""),
-    content: String(row.content ?? ""),
-    domain: String(row.scope_domain ?? ""),
-    feature: String(row.scope_feature ?? ""),
-    branch: String(row.scope_branch ?? ""),
-    taskType: String(row.scope_task_type ?? ""),
-    priority: Number(row.priority ?? 0),
-    confidence: Number(row.confidence ?? 0),
-    score: Number(row.score ?? 0),
-    status: String(row.status ?? "promoted") as ContextPackRecord["status"],
-    updatedAt: String(row.updated_at ?? ""),
-  }));
+    return rows.map((row) => ({
+      id: String(row.id ?? ""),
+      sourceType: String(row.source_type ?? ""),
+      sourceRef: String(row.source_ref ?? ""),
+      title: String(row.title ?? ""),
+      content: String(row.content ?? ""),
+      domain: String(row.scope_domain ?? ""),
+      feature: String(row.scope_feature ?? ""),
+      branch: String(row.scope_branch ?? ""),
+      taskType: String(row.scope_task_type ?? ""),
+      priority: Number(row.priority ?? 0),
+      confidence: Number(row.confidence ?? 0),
+      score: Number(row.score ?? 0),
+      status: String(row.status ?? "promoted") as ContextPackRecord["status"],
+      updatedAt: String(row.updated_at ?? ""),
+    }));
+  }
+
+  const strictRows = runQuery({
+    includeDomain: true,
+    includeFeature: true,
+    includeBranch: true,
+  });
+  if (strictRows.length > 0) {
+    return strictRows;
+  }
+
+  const broadRows = runQuery({
+    includeDomain: true,
+    includeFeature: false,
+    includeBranch: false,
+  });
+  if (broadRows.length > 0) {
+    return broadRows;
+  }
+
+  return runQuery({
+    includeDomain: false,
+    includeFeature: false,
+    includeBranch: false,
+  });
 }
 
 export function archiveFeatureContext(
