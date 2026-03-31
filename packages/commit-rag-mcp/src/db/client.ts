@@ -686,9 +686,40 @@ export function buildContextPack(
 
   // PRIORITY 0) Learned feature knowledge is always included first when available.
   // This ensures feature knowledge isn't lost behind PR metadata.
-  if (!options.feature && !options.branch) {
-    // Auto-discover recently learned features (source_type='feature-agent')
-    const learnedFacts = (
+  // Always include learned features regardless of parameter filters.
+  let learnedFacts: Array<Record<string, unknown>> = [];
+
+  if (options.feature) {
+    // Search for learned knowledge about the specific feature
+    learnedFacts = (
+      db.prepare(`
+        SELECT
+          id,
+          source_type,
+          source_ref,
+          title,
+          content,
+          scope_domain,
+          scope_feature,
+          scope_branch,
+          scope_task_type,
+          priority,
+          confidence,
+          status,
+          updated_at,
+          ((priority * 0.40) + (confidence * 0.30) + 0.25) AS score
+        FROM context_facts
+        WHERE source_type = 'feature-agent' AND scope_feature = ? AND status = 'promoted'
+        ORDER BY updated_at DESC, priority DESC
+        LIMIT ?
+      `) as any
+    ).all(
+      options.feature,
+      Math.max(3, Math.floor(options.limit * 0.2)),
+    ) as Array<Record<string, unknown>>;
+  } else {
+    // Auto-discover recently learned features when no specific feature is requested
+    learnedFacts = (
       db.prepare(`
         SELECT
           id,
@@ -713,25 +744,25 @@ export function buildContextPack(
     ).all(Math.max(3, Math.floor(options.limit * 0.2))) as Array<
       Record<string, unknown>
     >;
-
-    const learnedRows = learnedFacts.map((row) => ({
-      id: String(row.id ?? ""),
-      sourceType: String(row.source_type ?? ""),
-      sourceRef: String(row.source_ref ?? ""),
-      title: String(row.title ?? ""),
-      content: String(row.content ?? ""),
-      domain: String(row.scope_domain ?? ""),
-      feature: String(row.scope_feature ?? ""),
-      branch: String(row.scope_branch ?? ""),
-      taskType: String(row.scope_task_type ?? ""),
-      priority: Number(row.priority ?? 0),
-      confidence: Number(row.confidence ?? 0),
-      score: Number(row.score ?? 0),
-      status: String(row.status ?? "promoted") as ContextPackRecord["status"],
-      updatedAt: String(row.updated_at ?? ""),
-    }));
-    addRows(learnedRows);
   }
+
+  const learnedRows = learnedFacts.map((row) => ({
+    id: String(row.id ?? ""),
+    sourceType: String(row.source_type ?? ""),
+    sourceRef: String(row.source_ref ?? ""),
+    title: String(row.title ?? ""),
+    content: String(row.content ?? ""),
+    domain: String(row.scope_domain ?? ""),
+    feature: String(row.scope_feature ?? ""),
+    branch: String(row.scope_branch ?? ""),
+    taskType: String(row.scope_task_type ?? ""),
+    priority: Number(row.priority ?? 0),
+    confidence: Number(row.confidence ?? 0),
+    score: Number(row.score ?? 0),
+    status: String(row.status ?? "promoted") as ContextPackRecord["status"],
+    updatedAt: String(row.updated_at ?? ""),
+  }));
+  addRows(learnedRows);
 
   // 1) Main branch domain context is the durable source-of-truth baseline.
   if (pack.length < options.limit) {
@@ -886,4 +917,248 @@ export function archiveFeatureContext(
 
   const result = tx();
   return Number(result.changes ?? 0);
+}
+
+export interface FeatureResumeOptions {
+  feature: string;
+  domain?: string;
+  limit?: number;
+}
+
+export function getFeatureResume(
+  db: RagDatabase,
+  options: FeatureResumeOptions,
+): string {
+  const feature = String(options.feature ?? "").trim();
+  const domain = String(options.domain ?? "").trim();
+  const limit = Number(options.limit ?? 20);
+
+  if (!feature) {
+    return "# Feature Resume\n\nError: feature parameter is required.";
+  }
+
+  // Query learned feature facts
+  const learnedFacts = db
+    .prepare(
+      `
+        SELECT
+          title,
+          content,
+          confidence,
+          updated_at
+        FROM context_facts
+        WHERE source_type = 'feature-agent'
+          AND scope_feature = ?
+          AND status = 'promoted'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+    )
+    .all(feature) as Array<{
+    title: string;
+    content: string;
+    confidence: number;
+    updated_at: string;
+  }>;
+
+  // Query PR metadata related to the feature
+  const prFacts = db
+    .prepare(
+      `
+        SELECT
+          title,
+          content,
+          source_ref,
+          confidence,
+          updated_at
+        FROM context_facts
+        WHERE source_type LIKE 'pr_%'
+          AND (scope_feature = ? OR scope_branch LIKE ?)
+          AND status = 'promoted'
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `,
+    )
+    .all(feature, `%${feature}%`, limit) as Array<{
+    title: string;
+    content: string;
+    source_ref: string;
+    confidence: number;
+    updated_at: string;
+  }>;
+
+  // Build markdown document
+  const markdown: string[] = [];
+  markdown.push(`# Feature Resume: ${feature}`);
+  markdown.push("");
+
+  // Add learned knowledge section
+  if (learnedFacts.length > 0) {
+    const learned = learnedFacts[0];
+    markdown.push("## 📚 Feature Knowledge");
+    markdown.push(`**Confidence:** ${(learned.confidence * 100).toFixed(0)}%`);
+    markdown.push(
+      `**Last Updated:** ${new Date(learned.updated_at).toLocaleString()}`,
+    );
+    markdown.push("");
+    markdown.push(learned.content);
+    markdown.push("");
+  } else {
+    markdown.push("## 📚 Feature Knowledge");
+    markdown.push(
+      "*(No learned knowledge yet. Run `learn_feature` to seed context.)*",
+    );
+    markdown.push("");
+  }
+
+  // Add PR metadata section
+  if (prFacts.length > 0) {
+    markdown.push("## 🔗 Related Pull Requests");
+    markdown.push("");
+    for (const pr of prFacts) {
+      const confidence = (pr.confidence * 100).toFixed(0);
+      const ref = pr.source_ref || "unknown";
+      markdown.push(`- **${pr.title}** (${ref}) — ${confidence}% confidence`);
+      if (pr.content && pr.content.length < 200) {
+        markdown.push(`  > ${pr.content}`);
+      }
+    }
+    markdown.push("");
+  }
+
+  // Add recommendations
+  markdown.push("## 💡 Recommendations");
+  if (learnedFacts.length === 0) {
+    markdown.push(
+      '- Run `learn_feature({ featureBranch: "${feature}", agentContent: "..." })` to seed knowledge',
+    );
+  }
+  if (prFacts.length === 0) {
+    markdown.push(
+      "- Sync PR context with `pre_plan_sync_brief` to see related PRs",
+    );
+  }
+  markdown.push(
+    "- Use this resume alongside your active worktree for complete context",
+  );
+
+  return markdown.join("\n");
+}
+
+export function listLearnedFeatures(
+  db: RagDatabase,
+  options?: {
+    domain?: string;
+    status?: string;
+  },
+): Array<{
+  feature: string;
+  domain: string;
+  branch: string;
+  confidence: number;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  title: string;
+  contentLength: number;
+}> {
+  const clauses: string[] = ["source_type = 'feature-agent'"];
+  const values: Array<string> = [];
+
+  if (options?.domain) {
+    clauses.push("scope_domain = ?");
+    values.push(options.domain);
+  }
+  if (options?.status) {
+    clauses.push("status = ?");
+    values.push(options.status);
+  } else {
+    clauses.push("status = 'promoted'");
+  }
+
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+
+  const rows = (
+    db.prepare(`
+      SELECT DISTINCT
+        scope_feature as feature,
+        scope_domain as domain,
+        scope_branch as branch,
+        confidence,
+        status,
+        created_at,
+        updated_at,
+        title,
+        LENGTH(content) as contentLength
+      FROM context_facts
+      ${where}
+      ORDER BY updated_at DESC
+    `) as any
+  ).all(...values) as Array<Record<string, unknown>>;
+
+  return rows.map((row) => ({
+    feature: String(row.feature ?? ""),
+    domain: String(row.domain ?? ""),
+    branch: String(row.branch ?? ""),
+    confidence: Number(row.confidence ?? 0),
+    status: String(row.status ?? ""),
+    createdAt: String(row.created_at ?? ""),
+    updatedAt: String(row.updated_at ?? ""),
+    title: String(row.title ?? ""),
+    contentLength: Number(row.contentLength ?? 0),
+  }));
+}
+
+export function listAvailableBranches(
+  db: RagDatabase,
+  options?: {
+    domain?: string;
+    feature?: string;
+  },
+): Array<{
+  branch: string;
+  feature: string;
+  domain: string;
+  factCount: number;
+  lastUpdated: string;
+  topConfidence: number;
+}> {
+  const clauses: string[] = ["status = 'promoted'"];
+  const values: Array<string> = [];
+
+  if (options?.domain) {
+    clauses.push("scope_domain = ?");
+    values.push(options.domain);
+  }
+  if (options?.feature) {
+    clauses.push("scope_feature = ?");
+    values.push(options.feature);
+  }
+
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+
+  const rows = (
+    db.prepare(`
+      SELECT
+        scope_branch as branch,
+        scope_feature as feature,
+        scope_domain as domain,
+        COUNT(*) as factCount,
+        MAX(updated_at) as lastUpdated,
+        MAX(confidence) as topConfidence
+      FROM context_facts
+      ${where}
+      GROUP BY scope_branch, scope_feature, scope_domain
+      ORDER BY updated_at DESC
+    `) as any
+  ).all(...values) as Array<Record<string, unknown>>;
+
+  return rows.map((row) => ({
+    branch: String(row.branch ?? ""),
+    feature: String(row.feature ?? ""),
+    domain: String(row.domain ?? ""),
+    factCount: Number(row.factCount ?? 0),
+    lastUpdated: String(row.lastUpdated ?? ""),
+    topConfidence: Number(row.topConfidence ?? 0),
+  }));
 }

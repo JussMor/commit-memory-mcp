@@ -14,6 +14,9 @@ import { pathToFileURL } from "node:url";
 import {
   archiveFeatureContext,
   buildContextPack,
+  getFeatureResume,
+  listLearnedFeatures,
+  listAvailableBranches,
   openDatabase,
   promoteContextFacts,
   upsertContextFact,
@@ -439,6 +442,53 @@ export async function startMcpServer(): Promise<void> {
         },
       },
       {
+        name: "get_feature_resume",
+        description:
+          "Combine learned feature knowledge with PR metadata and return as markdown. Does NOT require a git worktree. Use this to review a feature's complete context: what we learned about it + related PR activity.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            feature: {
+              type: "string",
+              description: "e.g. messaging",
+            },
+            domain: { type: "string" },
+            limit: { type: "number" },
+          },
+          required: ["feature"],
+        },
+      },
+      {
+        name: "list_learned_features",
+        description:
+          "List all learned features stored in the knowledge database with confidence levels and timestamps.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string" },
+            status: {
+              type: "string",
+              description:
+                "Filter by status (promoted, draft, etc). Defaults to promoted.",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "list_available_branches",
+        description:
+          "List all available branches and features with knowledge context available for each.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string" },
+            feature: { type: "string" },
+          },
+          required: [],
+        },
+      },
+      {
         name: "pre_plan_sync_brief",
         description:
           "Run sync + overnight + feature resume analysis before planning work.",
@@ -811,6 +861,156 @@ export async function startMcpServer(): Promise<void> {
       return {
         content: [{ type: "text", text: JSON.stringify(brief, null, 2) }],
       };
+    }
+
+    if (request.params.name === "get_feature_resume") {
+      const feature = String(request.params.arguments?.feature ?? "").trim();
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const limit = Number(
+        (request.params.arguments?.limit as number | undefined) ?? 20,
+      );
+
+      if (!feature) {
+        return {
+          content: [{ type: "text", text: "feature parameter is required" }],
+          isError: true,
+        };
+      }
+
+      const db = openDatabase(dbPath);
+      try {
+        const resume = getFeatureResume(db, {
+          feature,
+          domain: domain || undefined,
+          limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
+        });
+
+        return {
+          content: [{ type: "text", text: resume }],
+        };
+      } finally {
+        db.close();
+      }
+    }
+
+    if (request.params.name === "list_learned_features") {
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const status = String(request.params.arguments?.status ?? "").trim();
+
+      const db = openDatabase(dbPath);
+      try {
+        const features = listLearnedFeatures(db, {
+          domain: domain || undefined,
+          status: status || undefined,
+        });
+
+        const markdown = [
+          "# Learned Features",
+          "",
+          features.length === 0
+            ? "*(No learned features yet)*"
+            : `${features.length} feature(s) available:`,
+          "",
+        ];
+
+        if (features.length > 0) {
+          markdown.push(
+            "| Feature | Domain | Branch | Confidence | Status | Last Updated |",
+          );
+          markdown.push(
+            "|---------|--------|--------|------------|--------|--------------|",
+          );
+
+          for (const feat of features) {
+            const confidence = (feat.confidence * 100).toFixed(0);
+            const lastUpdated = new Date(feat.updatedAt).toLocaleDateString();
+            markdown.push(
+              `| **${feat.feature}** | ${feat.domain} | ${feat.branch} | ${confidence}% | ${feat.status} | ${lastUpdated} |`,
+            );
+          }
+
+          markdown.push("");
+          markdown.push("## Feature Details");
+          markdown.push("");
+
+          for (const feat of features) {
+            markdown.push(`### ${feat.feature}`);
+            markdown.push(`- **Confidence:** ${(feat.confidence * 100).toFixed(0)}%`);
+            markdown.push(`- **Domain:** ${feat.domain}`);
+            markdown.push(`- **Branch:** ${feat.branch}`);
+            markdown.push(`- **Status:** ${feat.status}`);
+            markdown.push(`- **Created:** ${new Date(feat.createdAt).toLocaleString()}`);
+            markdown.push(`- **Updated:** ${new Date(feat.updatedAt).toLocaleString()}`);
+            markdown.push(`- **Title:** ${feat.title}`);
+            markdown.push(`- **Content size:** ${feat.contentLength} bytes`);
+            markdown.push("");
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: markdown.join("\n") }],
+        };
+      } finally {
+        db.close();
+      }
+    }
+
+    if (request.params.name === "list_available_branches") {
+      const domain = String(request.params.arguments?.domain ?? "").trim();
+      const feature = String(request.params.arguments?.feature ?? "").trim();
+
+      const db = openDatabase(dbPath);
+      try {
+        const branches = listAvailableBranches(db, {
+          domain: domain || undefined,
+          feature: feature || undefined,
+        });
+
+        const markdown = [
+          "# Available Branches and Features",
+          "",
+          branches.length === 0
+            ? "*(No branches with knowledge available)*"
+            : `${branches.length} branch/feature combination(s):`,
+          "",
+        ];
+
+        if (branches.length > 0) {
+          markdown.push(
+            "| Branch | Feature | Domain | Facts | Confidence | Last Updated |",
+          );
+          markdown.push(
+            "|--------|---------|--------|-------|------------|--------------|",
+          );
+
+          for (const branch of branches) {
+            const confidence = (branch.topConfidence * 100).toFixed(0);
+            const lastUpdated = new Date(branch.lastUpdated).toLocaleDateString();
+            markdown.push(
+              `| **${branch.branch}** | ${branch.feature} | ${branch.domain} | ${branch.factCount} | ${confidence}% | ${lastUpdated} |`,
+            );
+          }
+
+          markdown.push("");
+          markdown.push("## Branch Details");
+          markdown.push("");
+
+          for (const branch of branches) {
+            markdown.push(`### ${branch.branch} (${branch.feature})`);
+            markdown.push(`- **Domain:** ${branch.domain}`);
+            markdown.push(`- **Facts stored:** ${branch.factCount}`);
+            markdown.push(`- **Top confidence:** ${(branch.topConfidence * 100).toFixed(0)}%`);
+            markdown.push(`- **Last updated:** ${new Date(branch.lastUpdated).toLocaleString()}`);
+            markdown.push("");
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: markdown.join("\n") }],
+        };
+      } finally {
+        db.close();
+      }
     }
 
     if (request.params.name === "pre_plan_sync_brief") {
