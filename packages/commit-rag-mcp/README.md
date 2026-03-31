@@ -108,6 +108,9 @@ build_context_pack({
 ```
 
 Use this before invoking a coding subagent to keep prompts small and focused.
+If no rows are found in strict scope, the server now falls back automatically to broader scope levels.
+
+Important: if you provide `domain`/`feature`/`branch` tags in `build_context_pack`, use the same tags during `sync_pr_context` for best precision.
 
 ### Promote draft facts after review
 
@@ -142,6 +145,20 @@ who_changed_this({
 ```
 
 Use this to discover recent authors and commit history for a target file.
+
+### Explain what is happening in a Next.js folder
+
+```text
+explain_path_activity({
+  targetPath: "app/dashboard",
+  owner: "MaxwellClinic-Development",
+  repo: "EverBetter-Pro",
+  limit: 30
+})
+```
+
+Use this when you want a fast folder-level summary for areas like `app/dashboard`, `app/(authenticated)`, or `src/components`.
+It returns recent commits, top authors, most touched files, and related PR context/decisions when available.
 
 ### Explain intent for a change
 

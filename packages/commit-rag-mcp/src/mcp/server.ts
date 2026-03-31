@@ -20,6 +20,7 @@ import {
 } from "../db/client.js";
 import {
   commitDetails,
+  explainPathActivity,
   latestCommitForFile,
   mainBranchOvernightBrief,
   resumeFeatureSessionBrief,
@@ -46,6 +47,112 @@ function detectReferencedPrNumber(text: string): number | null {
   }
 
   return value;
+}
+
+function parsePrNumberFromSourceRef(sourceRef: string): number | null {
+  const match = sourceRef.match(/#(\d{1,8})\b/);
+  if (!match) {
+    return null;
+  }
+
+  const value = Number.parseInt(match[1] ?? "", 10);
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  return value;
+}
+
+function loadPathPullRequestContext(
+  db: Database,
+  options: {
+    targetPath: string;
+    owner?: string;
+    repo?: string;
+    referencedPrNumbers: number[];
+  },
+): Array<Record<string, unknown>> {
+  const prNumbers = new Set<number>(options.referencedPrNumbers);
+
+  const likePattern = `%${options.targetPath}%`;
+  const sourceRows = db
+    .prepare(
+      `
+      SELECT source_ref
+      FROM context_facts
+      WHERE (title LIKE ? OR content LIKE ?)
+        AND source_ref LIKE '%#%'
+      ORDER BY updated_at DESC
+      LIMIT 80
+    `,
+    )
+    .all(likePattern, likePattern) as Array<{ source_ref: string }>;
+
+  for (const row of sourceRows) {
+    const number = parsePrNumberFromSourceRef(String(row.source_ref ?? ""));
+    if (number) {
+      prNumbers.add(number);
+    }
+  }
+
+  if (prNumbers.size === 0) {
+    return [];
+  }
+
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const prNumber of Array.from(prNumbers).slice(0, 20)) {
+    const pr =
+      options.owner && options.repo
+        ? ((db
+            .prepare(
+              `
+              SELECT repo_owner, repo_name, pr_number, title, body, author, state, created_at, updated_at, merged_at, url
+              FROM prs
+              WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?
+              LIMIT 1
+            `,
+            )
+            .get(options.owner, options.repo, prNumber) as
+            | Record<string, unknown>
+            | undefined) ?? null)
+        : ((db
+            .prepare(
+              `
+              SELECT repo_owner, repo_name, pr_number, title, body, author, state, created_at, updated_at, merged_at, url
+              FROM prs
+              WHERE pr_number = ?
+              ORDER BY updated_at DESC
+              LIMIT 1
+            `,
+            )
+            .get(prNumber) as Record<string, unknown> | undefined) ?? null);
+
+    if (!pr) {
+      continue;
+    }
+
+    const decisions = db
+      .prepare(
+        `
+        SELECT id, source, author, summary, severity, created_at
+        FROM pr_decisions
+        WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?
+        ORDER BY created_at DESC
+        LIMIT 20
+      `,
+      )
+      .all(pr.repo_owner, pr.repo_name, pr.pr_number) as Array<
+      Record<string, unknown>
+    >;
+
+    results.push({
+      pr,
+      decisions,
+    });
+  }
+
+  return results;
 }
 
 function loadPullRequestContext(
@@ -218,6 +325,21 @@ export async function startMcpServer(): Promise<void> {
             limit: { type: "number" },
           },
           required: ["filePath"],
+        },
+      },
+      {
+        name: "explain_path_activity",
+        description:
+          "Given a file or folder path, summarize activity, top files/authors, and related PR context.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            targetPath: { type: "string" },
+            owner: { type: "string" },
+            repo: { type: "string" },
+            limit: { type: "number" },
+          },
+          required: ["targetPath"],
         },
       },
       {
@@ -462,6 +584,62 @@ export async function startMcpServer(): Promise<void> {
       return {
         content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
       };
+    }
+
+    if (request.params.name === "explain_path_activity") {
+      const targetPath = String(request.params.arguments?.targetPath ?? "").trim();
+      const owner = String(request.params.arguments?.owner ?? "").trim();
+      const repo = String(request.params.arguments?.repo ?? "").trim();
+      const limit = Number(
+        (request.params.arguments?.limit as number | undefined) ?? 25,
+      );
+      if (!targetPath) {
+        return {
+          content: [{ type: "text", text: "targetPath is required" }],
+          isError: true,
+        };
+      }
+
+      const output = explainPathActivity({
+        repoPath,
+        targetPath,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : 25,
+      });
+
+      const referencedPrNumbers = output.commits
+        .map((commit) => {
+          const details = commitDetails(repoPath, commit.sha);
+          return detectReferencedPrNumber(`${details.subject}\n${details.body}`);
+        })
+        .filter((value): value is number => Number.isFinite(value));
+
+      const db = openDatabase(dbPath);
+      try {
+        const relatedPullRequests = loadPathPullRequestContext(db, {
+          targetPath,
+          owner: owner || undefined,
+          repo: repo || undefined,
+          referencedPrNumbers,
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  ...output,
+                  relatedPullRequests,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } finally {
+        db.close();
+      }
     }
 
     if (request.params.name === "why_was_this_changed") {
