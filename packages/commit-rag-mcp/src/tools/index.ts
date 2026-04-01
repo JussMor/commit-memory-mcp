@@ -22,6 +22,7 @@ import {
 export function registerTools(server: McpServer): void {
   server.tool(
     "sync_pr_context",
+    "Sync PR context from GitHub into the local knowledge store.",
     { repo: z.string(), limit: z.number().optional() },
     async ({ repo, limit }) => ({
       content: [{ type: "text", text: await syncPrContext(repo, limit) }],
@@ -30,6 +31,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "who_changed_this",
+    "Show recent authors and commits for a file path.",
     { file: z.string(), repo: z.string() },
     async ({ file, repo }) => ({
       content: [{ type: "text", text: await whoChangedThis(file, repo) }],
@@ -38,6 +40,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "why_was_this_changed",
+    "Explain the intent behind a file change or commit using traceability context.",
     {
       file: z.string().optional(),
       sha: z.string().optional(),
@@ -52,18 +55,25 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "get_main_branch_overnight_brief",
+    "Summarize merged main-branch changes over the last N hours.",
     { repo: z.string(), hours: z.number().optional() },
     async ({ repo, hours }) => ({
       content: [{ type: "text", text: await getOvernightBrief(repo, hours) }],
     }),
   );
 
-  server.tool("list_active_worktrees", {}, async () => ({
-    content: [{ type: "text", text: await listActiveWorktrees() }],
-  }));
+  server.tool(
+    "list_active_worktrees",
+    "List active git worktrees for the current repository.",
+    {},
+    async () => ({
+      content: [{ type: "text", text: await listActiveWorktrees() }],
+    }),
+  );
 
   server.tool(
     "ingest_pr",
+    "Ingest a PR and persist its context into Surreal knowledge records.",
     { repo: z.string(), pr_number: z.number() },
     async ({ repo, pr_number }) => {
       await ingestPr(repo, pr_number);
@@ -73,6 +83,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "extract_business_facts",
+    "Extract business-facing facts from a PR into a target module.",
     { repo: z.string(), pr_number: z.number(), module: z.string() },
     async ({ repo, pr_number, module }) => {
       await extractBusinessFacts(repo, pr_number, module);
@@ -89,6 +100,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "get_module_overview",
+    "Return a high-level overview for a module from stored context.",
     { module: z.string() },
     async ({ module }) => ({
       content: [{ type: "text", text: await getModuleOverview(module) }],
@@ -97,6 +109,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "get_latest_module_knowledge",
+    "Fetch the latest knowledge entries for a module and optional topic.",
     {
       module: z.string(),
       topic: z.string().optional(),
@@ -114,6 +127,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "get_knowledge_lineage",
+    "Trace lineage and provenance for module knowledge over time.",
     {
       module: z.string(),
       topic: z.string().optional(),
@@ -131,6 +145,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "get_module_graph",
+    "Return the relationship graph for a module and related knowledge.",
     { module: z.string() },
     async ({ module }) => ({
       content: [{ type: "text", text: await getModuleGraph(module) }],
@@ -139,6 +154,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "promote_context_facts",
+    "Promote vetted context facts into durable module knowledge.",
     { module: z.string(), pr_number: z.number().optional() },
     async ({ module, pr_number }) => ({
       content: [
@@ -149,6 +165,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "search_module_context",
+    "Search stored context for a module using semantic retrieval.",
     {
       module: z.string(),
       query: z.string(),
@@ -166,6 +183,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "ingest_current_knowledge_demo",
+    "Insert current-session findings into module knowledge (demo helper).",
     {
       module: z.string(),
       topic: z.string(),
@@ -203,6 +221,7 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "pre_plan_sync_brief",
+    "Run pre-plan sync checks and return a planning brief for a module.",
     { repo: z.string(), module: z.string() },
     async ({ repo, module }) => ({
       content: [{ type: "text", text: await prePlanSyncBrief(repo, module) }],
