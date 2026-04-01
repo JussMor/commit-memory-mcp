@@ -1,12 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  agentRetrieveContext,
-  buildContextPack,
+  getKnowledgeLineage,
+  getLatestKnowledge,
   getModuleGraph,
-  getModuleKnowledge,
+  getModuleOverview,
+  ingestCurrentKnowledgeDemo,
   prePlanSyncBrief,
   promoteContextFacts,
+  searchModuleContext,
 } from "../layers/business.js";
 import { extractBusinessFacts, ingestPr } from "../layers/ingest.js";
 import {
@@ -86,10 +88,44 @@ export function registerTools(server: McpServer): void {
   );
 
   server.tool(
-    "get_module_knowledge",
+    "get_module_overview",
     { module: z.string() },
     async ({ module }) => ({
-      content: [{ type: "text", text: await getModuleKnowledge(module) }],
+      content: [{ type: "text", text: await getModuleOverview(module) }],
+    }),
+  );
+
+  server.tool(
+    "get_latest_module_knowledge",
+    {
+      module: z.string(),
+      topic: z.string().optional(),
+      limit: z.number().optional(),
+    },
+    async ({ module, topic, limit }) => ({
+      content: [
+        {
+          type: "text",
+          text: await getLatestKnowledge(module, topic, limit),
+        },
+      ],
+    }),
+  );
+
+  server.tool(
+    "get_knowledge_lineage",
+    {
+      module: z.string(),
+      topic: z.string().optional(),
+      depth: z.number().optional(),
+    },
+    async ({ module, topic, depth }) => ({
+      content: [
+        {
+          type: "text",
+          text: await getKnowledgeLineage(module, topic, depth),
+        },
+      ],
     }),
   );
 
@@ -112,21 +148,7 @@ export function registerTools(server: McpServer): void {
   );
 
   server.tool(
-    "build_context_pack",
-    {
-      module: z.string(),
-      limit: z.number().optional(),
-      query: z.string().optional(),
-    },
-    async ({ module, limit, query }) => ({
-      content: [
-        { type: "text", text: await buildContextPack(module, limit, query) },
-      ],
-    }),
-  );
-
-  server.tool(
-    "agent_retrieve_context",
+    "search_module_context",
     {
       module: z.string(),
       query: z.string(),
@@ -136,7 +158,44 @@ export function registerTools(server: McpServer): void {
       content: [
         {
           type: "text",
-          text: await agentRetrieveContext(module, query, limit),
+          text: await searchModuleContext(module, query, limit),
+        },
+      ],
+    }),
+  );
+
+  server.tool(
+    "ingest_current_knowledge_demo",
+    {
+      module: z.string(),
+      topic: z.string(),
+      findings: z.string(),
+      route: z.string().optional(),
+      feature: z.string().optional(),
+      related_modules: z.array(z.string()).optional(),
+      tags: z.array(z.string()).optional(),
+    },
+    async ({
+      module,
+      topic,
+      findings,
+      route,
+      feature,
+      related_modules,
+      tags,
+    }) => ({
+      content: [
+        {
+          type: "text",
+          text: await ingestCurrentKnowledgeDemo(
+            module,
+            topic,
+            findings,
+            route,
+            feature,
+            related_modules,
+            tags,
+          ),
         },
       ],
     }),

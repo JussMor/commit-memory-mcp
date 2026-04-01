@@ -2,6 +2,15 @@
 
 MCP server for PR traceability + business context, backed by SurrealDB.
 
+## Latest technology
+
+- SurrealDB document + graph + vector-native schema
+- FULLTEXT indexes (BM25) for keyword retrieval
+- HNSW vector indexes for semantic retrieval
+- Hybrid ranker that combines semantic similarity, full-text score, keyword overlap, and confidence/importance
+- Open-source local embedding model support via `@xenova/transformers` (default: `Xenova/all-MiniLM-L6-v2`)
+- Optional Ollama embeddings fallback, plus deterministic hashed fallback
+
 ## What it does
 
 This server lets coding agents answer:
@@ -20,10 +29,10 @@ This server lets coding agents answer:
 - `list_active_worktrees`
 - `ingest_pr`
 - `extract_business_facts`
-- `get_module_knowledge`
+- `get_module_overview`
 - `get_module_graph`
 - `promote_context_facts`
-- `build_context_pack`
+- `search_module_context`
 - `pre_plan_sync_brief`
 
 ## Install
@@ -47,6 +56,11 @@ npx -y @jussmor/commit-memory-mcp-surreal
 - `SURREAL_NS` (default: `main`)
 - `SURREAL_DB` (default: `main`)
 - `GH_BIN` optional absolute path to GitHub CLI (for example `/opt/homebrew/bin/gh`)
+- `COMMIT_RAG_EMBED_MODEL` optional local open-source embedding model id (default: `Xenova/all-MiniLM-L6-v2`)
+- `COMMIT_RAG_DISABLE_LOCAL_EMBEDDINGS` set `1` to skip local transformers embeddings
+- `OLLAMA_EMBED_MODEL` optional Ollama embedding model (used when local embeddings are disabled/unavailable)
+- `OLLAMA_BASE_URL` optional Ollama base URL (default: `http://127.0.0.1:11434`)
+- `COMMIT_RAG_DIMENSION` optional embedding dimension (default: `384`)
 
 ## VS Code MCP config examples
 
@@ -137,10 +151,16 @@ extract_business_facts({ repo: "JussMor/commit-memory-mcp", pr_number: 123, modu
 promote_context_facts({ module: "billing", pr_number: 123 })
 ```
 
-### Build context pack before coding
+### Search module context before coding
 
 ```text
-build_context_pack({ module: "billing", limit: 10 })
+search_module_context({ module: "billing", query: "invoice retry timeout", limit: 10 })
+```
+
+### Retrieve complete module overview
+
+```text
+get_module_overview({ module: "billing" })
 ```
 
 ### Pre-plan brief (recommended before implementation)

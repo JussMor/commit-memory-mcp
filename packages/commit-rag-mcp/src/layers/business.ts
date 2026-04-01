@@ -1,5 +1,6 @@
 import { getDb } from "../db/client.js";
 import { embedText, getExpectedDimension } from "../search/embeddings.js";
+import { ingestKnowledgeInvestigation } from "./knowledge.js";
 
 type SurrealResult = unknown[];
 
@@ -34,6 +35,17 @@ type ModuleKnowledge = {
   facts?: ModuleFact[];
   recent_prs?: unknown[];
   memory_chunks?: MemoryChunk[];
+  latest_knowledge?: Array<{
+    topic?: string;
+    summary?: string;
+    details?: string;
+    tags?: string[];
+    related_modules?: string[];
+    version?: number;
+    updated_at?: string;
+    source_type?: string;
+    source_ref?: string;
+  }>;
 };
 
 type ContextPack = {
@@ -340,6 +352,15 @@ export async function getModuleKnowledge(moduleName: string): Promise<string> {
             AND status = 'active'
           ORDER BY importance DESC, created_at DESC
           LIMIT 10
+        ),
+        latest_knowledge: (
+          SELECT topic, summary, details, tags, related_modules,
+            version, updated_at, source_type, source_ref
+          FROM knowledge_note
+          WHERE module = $mod.id
+            AND is_latest = true
+          ORDER BY updated_at DESC
+          LIMIT 10
         )
       }
     `,
@@ -355,6 +376,246 @@ export async function getModuleKnowledge(moduleName: string): Promise<string> {
       memory_chunks: compactMemoryChunks(
         dedupeMemoryChunks(knowledge.memory_chunks ?? []),
       ),
+    },
+    null,
+    2,
+  );
+}
+
+export async function getModuleOverview(moduleName: string): Promise<string> {
+  return getModuleKnowledge(moduleName);
+}
+
+export async function ingestCurrentKnowledgeDemo(
+  moduleName: string,
+  topic: string,
+  findings: string,
+  route?: string,
+  feature?: string,
+  relatedModules?: string[],
+  tags?: string[],
+): Promise<string> {
+  const result = await ingestKnowledgeInvestigation({
+    module: moduleName,
+    topic,
+    findings,
+    route,
+    feature,
+    relatedModules,
+    tags,
+    sourceType: "investigation_demo",
+    sourceRef: `demo:${moduleName}:${topic}`,
+    tag: "demo",
+    confidence: 0.8,
+  });
+
+  return JSON.stringify(
+    {
+      ...result,
+      tag: "demo",
+      note: "knowledge_note uses version + is_latest with supersedes lineage so you can always query latest and still keep history",
+    },
+    null,
+    2,
+  );
+}
+
+export async function getLatestKnowledge(
+  moduleName: string,
+  topic?: string,
+  limit = 10,
+): Promise<string> {
+  const db = await getDb();
+
+  const normalizedTopic = topic?.trim();
+  const result = (await db.query(
+    `
+      LET $mod = (SELECT * FROM module WHERE name = $name LIMIT 1)[0];
+
+      RETURN {
+        module: $mod.name,
+        topic_filter: $topic,
+        latest: (
+          SELECT id, topic, summary, details, tags, related_modules,
+            version, updated_at, source_type, source_ref, is_latest
+          FROM knowledge_note
+          WHERE module = $mod.id
+            AND is_latest = true
+          ORDER BY updated_at DESC
+          LIMIT $limit
+        )
+      }
+    `,
+    {
+      name: moduleName,
+      topic: normalizedTopic ?? null,
+      limit,
+    },
+  )) as SurrealResult;
+
+  const payload =
+    (getLastDefinedResult(result) as {
+      module?: string;
+      topic_filter?: string | null;
+      latest?: Array<{
+        id?: string;
+        topic?: string;
+        summary?: string;
+        details?: string;
+        tags?: string[];
+        related_modules?: string[];
+        version?: number;
+        updated_at?: string;
+        source_type?: string;
+        source_ref?: string;
+        is_latest?: boolean;
+      }>;
+    }) ?? {};
+
+  const latest = payload.latest ?? [];
+  const filtered = normalizedTopic
+    ? latest.filter(
+        (item) =>
+          (item.topic ?? "").toLowerCase() === normalizedTopic.toLowerCase(),
+      )
+    : latest;
+
+  return JSON.stringify(
+    {
+      module: payload.module ?? moduleName,
+      topic_filter: normalizedTopic ?? null,
+      count: filtered.length,
+      latest: filtered,
+    },
+    null,
+    2,
+  );
+}
+
+export async function getKnowledgeLineage(
+  moduleName: string,
+  topic?: string,
+  depth = 10,
+): Promise<string> {
+  const db = await getDb();
+  const normalizedTopic = topic?.trim();
+  const maxDepth = Math.max(1, Math.min(depth, 50));
+
+  const latestResult = (await db.query(
+    `
+      LET $mod = (SELECT * FROM module WHERE name = $name LIMIT 1)[0];
+      RETURN (
+        SELECT id, topic, summary, details, tags, related_modules,
+          version, updated_at, source_type, source_ref, is_latest
+        FROM knowledge_note
+        WHERE module = $mod.id
+          AND is_latest = true
+        ORDER BY updated_at DESC
+        LIMIT 100
+      )
+    `,
+    { name: moduleName },
+  )) as SurrealResult;
+
+  const latestRows =
+    getLastDefinedResult<
+      Array<{
+        id?: string;
+        topic?: string;
+        summary?: string;
+        details?: string;
+        tags?: string[];
+        related_modules?: string[];
+        version?: number;
+        updated_at?: string;
+        source_type?: string;
+        source_ref?: string;
+        is_latest?: boolean;
+      }>
+    >(latestResult) ?? [];
+
+  const selectedLatest = normalizedTopic
+    ? latestRows.find(
+        (row) =>
+          (row.topic ?? "").toLowerCase() === normalizedTopic.toLowerCase(),
+      )
+    : latestRows[0];
+
+  if (!selectedLatest?.id) {
+    return JSON.stringify(
+      {
+        module: moduleName,
+        topic_filter: normalizedTopic ?? null,
+        latest: null,
+        lineage: [],
+        message: "No latest knowledge note found for module/topic",
+      },
+      null,
+      2,
+    );
+  }
+
+  const lineage: Array<{
+    id?: string;
+    topic?: string;
+    summary?: string;
+    version?: number;
+    updated_at?: string;
+    source_type?: string;
+    source_ref?: string;
+  }> = [];
+
+  let cursorId: string | undefined = selectedLatest.id;
+  let hops = 0;
+  while (cursorId && hops < maxDepth) {
+    const prevIdResult = (await db.query(
+      `
+        RETURN (SELECT VALUE out FROM supersedes WHERE in = $id LIMIT 1)[0]
+      `,
+      { id: cursorId },
+    )) as SurrealResult;
+
+    const prevId = getLastDefinedResult<string | null>(prevIdResult) ?? null;
+    if (!prevId) {
+      break;
+    }
+
+    const prevResult = (await db.query(
+      `
+        RETURN (
+          SELECT id, topic, summary, version, updated_at, source_type, source_ref
+          FROM $id
+          LIMIT 1
+        )[0]
+      `,
+      { id: prevId },
+    )) as SurrealResult;
+
+    const prev = getLastDefinedResult<{
+      id?: string;
+      topic?: string;
+      summary?: string;
+      version?: number;
+      updated_at?: string;
+      source_type?: string;
+      source_ref?: string;
+    }>(prevResult);
+
+    if (!prev?.id) {
+      break;
+    }
+
+    lineage.push(prev);
+    cursorId = prev.id;
+    hops += 1;
+  }
+
+  return JSON.stringify(
+    {
+      module: moduleName,
+      topic_filter: normalizedTopic ?? selectedLatest.topic ?? null,
+      latest: selectedLatest,
+      lineage,
     },
     null,
     2,
@@ -567,6 +828,14 @@ export async function buildContextPack(
     null,
     2,
   );
+}
+
+export async function searchModuleContext(
+  moduleName: string,
+  query: string,
+  limit = 10,
+): Promise<string> {
+  return buildContextPack(moduleName, limit, query);
 }
 
 type AgentEvidenceItem = {

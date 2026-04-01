@@ -112,10 +112,43 @@ export async function runMigrations(): Promise<void> {
   `);
 
   await db.query(`
+    DEFINE TABLE IF NOT EXISTS knowledge_note SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS module ON knowledge_note TYPE record<module>;
+    DEFINE FIELD IF NOT EXISTS topic ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS topic_key ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS summary ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS details ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS source_type ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS source_ref ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS tags ON knowledge_note TYPE array<string>;
+    DEFINE FIELD IF NOT EXISTS related_modules ON knowledge_note TYPE array<string>;
+    DEFINE FIELD IF NOT EXISTS content_hash ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS version ON knowledge_note TYPE int;
+    DEFINE FIELD IF NOT EXISTS is_latest ON knowledge_note TYPE bool DEFAULT true;
+    DEFINE FIELD IF NOT EXISTS confidence ON knowledge_note TYPE number DEFAULT 0.75;
+    DEFINE FIELD IF NOT EXISTS search_text ON knowledge_note TYPE string;
+    DEFINE FIELD IF NOT EXISTS embedding ON knowledge_note TYPE array<number>;
+    DEFINE FIELD IF NOT EXISTS created_at ON knowledge_note TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON knowledge_note TYPE datetime DEFAULT time::now();
+
+    DEFINE INDEX IF NOT EXISTS knowledge_note_topic_latest
+      ON TABLE knowledge_note COLUMNS module, topic_key, is_latest;
+    DEFINE INDEX IF NOT EXISTS knowledge_note_source_ref
+      ON TABLE knowledge_note COLUMNS source_ref;
+    DEFINE INDEX IF NOT EXISTS knowledge_note_fts
+      ON TABLE knowledge_note COLUMNS search_text FULLTEXT ANALYZER commit_memory_text BM25;
+    DEFINE INDEX IF NOT EXISTS knowledge_note_embedding_idx
+      ON TABLE knowledge_note COLUMNS embedding HNSW DIMENSION 384 DIST COSINE TYPE F32;
+  `);
+
+  await db.query(`
     DEFINE TABLE IF NOT EXISTS affects SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
     DEFINE TABLE IF NOT EXISTS required_by SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
     DEFINE TABLE IF NOT EXISTS belongs_to SCHEMALESS TYPE RELATION FROM pr TO module PERMISSIONS NONE;
     DEFINE TABLE IF NOT EXISTS part_of SCHEMALESS TYPE RELATION FROM commit TO pr PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS supersedes SCHEMALESS TYPE RELATION FROM knowledge_note TO knowledge_note PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS mentions_module SCHEMALESS TYPE RELATION FROM knowledge_note TO module PERMISSIONS NONE;
   `);
 
   console.log("[schema] migrations complete");

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { getDb } from "../db/client.js";
 import { embedText, getExpectedDimension } from "../search/embeddings.js";
 import { runGh } from "./gh.js";
+import { ingestKnowledgeInvestigation } from "./knowledge.js";
 
 type GhPr = {
   number: number;
@@ -373,6 +374,23 @@ export async function extractBusinessFacts(
       tags,
       confidence: 0.8,
       importance: 0.75,
+    });
+
+    await ingestKnowledgeInvestigation({
+      module: moduleName,
+      topic: `PR #${prNumber}: ${pr.title}`,
+      findings: [
+        `Summary: ${summary}`,
+        rationale ? `Rationale: ${rationale}` : "",
+        `Changed files: ${pr.files.map((file) => file.path).join(", ")}`,
+      ]
+        .filter((value) => value.length > 0)
+        .join("\n"),
+      tags,
+      sourceType: "business_fact_auto",
+      sourceRef: `${repo}#${prNumber}`,
+      tag: "auto",
+      confidence: 0.8,
     });
   }
 
