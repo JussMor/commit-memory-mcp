@@ -268,9 +268,9 @@ export async function startMcpServer(): Promise<void> {
         },
       },
       {
-        name: "build_context_pack",
+        name: "search_module_context",
         description:
-          "Build a scoped context pack for a task/domain/feature/branch. Returns learned feature knowledge, branch context, and PR metadata separately.",
+          "Build a scoped context pack for retrieval across task/domain/feature/branch context.",
         inputSchema: {
           type: "object",
           properties: {
@@ -556,7 +556,7 @@ export async function startMcpServer(): Promise<void> {
       };
     }
 
-    if (request.params.name === "build_context_pack") {
+    if (request.params.name === "search_module_context") {
       const limit = Number(
         (request.params.arguments?.limit as number | undefined) ?? 20,
       );
@@ -1418,7 +1418,7 @@ export async function startMcpServer(): Promise<void> {
           updatedAt: now,
         });
 
-        // Audit log row (status: draft — invisible to default build_context_pack)
+        // Audit log row (status: draft — invisible to default search_module_context)
         if (newCommits.length > 0) {
           const auditDate = now.split("T")[0] ?? now;
           upsertContextFact(dbWrite, {
