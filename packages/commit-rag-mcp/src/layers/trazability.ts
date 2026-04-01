@@ -15,6 +15,94 @@ function makePrKey(repo: string, number: number): string {
   return `${safeRepo}_${number}`;
 }
 
+type PullRequestListItem = {
+  number: number;
+  title: string;
+  author?: { login?: string };
+  mergedAt: string | null;
+  baseRefName: string;
+};
+
+type PullRequestDetail = PullRequestListItem & {
+  body?: string | null;
+  files?: Array<{ path?: string | null }>;
+  labels?: Array<{ name?: string | null }>;
+  commits?: Array<
+    { oid?: string | null } | { commit?: { oid?: string | null } }
+  >;
+};
+
+function extractCommitShas(commits: PullRequestDetail["commits"]): string[] {
+  if (!Array.isArray(commits)) {
+    return [];
+  }
+
+  return commits
+    .map((commit) => {
+      if ("oid" in commit && typeof commit.oid === "string") {
+        return commit.oid;
+      }
+
+      if (
+        "commit" in commit &&
+        commit.commit &&
+        typeof commit.commit.oid === "string"
+      ) {
+        return commit.commit.oid;
+      }
+
+      return null;
+    })
+    .filter((sha): sha is string => Boolean(sha));
+}
+
+function extractFiles(files: PullRequestDetail["files"]): string[] {
+  if (!Array.isArray(files)) {
+    return [];
+  }
+
+  return files
+    .map((file) => file.path)
+    .filter((filePath): filePath is string => Boolean(filePath));
+}
+
+function extractLabels(labels: PullRequestDetail["labels"]): string[] {
+  if (!Array.isArray(labels)) {
+    return [];
+  }
+
+  return labels
+    .map((label) => label.name)
+    .filter((label): label is string => Boolean(label));
+}
+
+function fetchPullRequestDetail(
+  repo: string,
+  prNumber: number,
+): PullRequestDetail {
+  const { owner, name } = parseRepo(repo);
+  const raw = runGh([
+    "pr",
+    "view",
+    String(prNumber),
+    "--repo",
+    `${owner}/${name}`,
+    "--json",
+    "number,title,body,author,mergedAt,baseRefName,files,commits,labels",
+  ]);
+
+  return JSON.parse(raw) as PullRequestDetail;
+}
+
+function toDateOrNull(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 export async function syncPrContext(repo: string, limit = 20): Promise<string> {
   const db = await getDb();
   const { owner, name } = parseRepo(repo);
@@ -32,24 +120,24 @@ export async function syncPrContext(repo: string, limit = 20): Promise<string> {
     "number,title,author,mergedAt,baseRefName",
   ]);
 
-  const prs = JSON.parse(raw) as Array<{
-    number: number;
-    title: string;
-    author: { login: string };
-    mergedAt: string | null;
-    baseRefName: string;
-  }>;
+  const prs = JSON.parse(raw) as PullRequestListItem[];
 
   for (const pr of prs) {
+    const detail = fetchPullRequestDetail(repo, pr.number);
+
     await db.query(
       `
-        UPSERT type::thing('pr', $key) CONTENT {
+        UPSERT type::record('pr', $key) CONTENT {
           repo: $repo,
           number: $number,
           title: $title,
+          body: $body,
           author: $author,
           merged_at: $merged_at,
           base_branch: $base_branch,
+          files: $files,
+          labels: $labels,
+          commits: $commits,
           state: 'merged',
           synced_at: time::now()
         }
@@ -58,10 +146,14 @@ export async function syncPrContext(repo: string, limit = 20): Promise<string> {
         key: makePrKey(repo, pr.number),
         repo,
         number: pr.number,
-        title: pr.title,
-        author: pr.author.login,
-        merged_at: pr.mergedAt,
-        base_branch: pr.baseRefName,
+        title: detail.title,
+        body: detail.body ?? "",
+        author: detail.author?.login ?? "unknown",
+        merged_at: toDateOrNull(detail.mergedAt),
+        base_branch: detail.baseRefName,
+        files: extractFiles(detail.files),
+        labels: extractLabels(detail.labels),
+        commits: extractCommitShas(detail.commits),
       },
     );
   }
@@ -157,7 +249,7 @@ export async function getOvernightBrief(
       SELECT number, title, author, merged_at
       FROM pr
       WHERE repo = $repo
-        AND merged_at > time::now() - duration::from::hours($hours)
+        AND merged_at > time::now() - duration::from_hours($hours)
         AND state = 'merged'
       ORDER BY merged_at DESC
     `,
@@ -181,7 +273,7 @@ export async function listActiveWorktrees(): Promise<string> {
     const key = wt.path.replace(/[^a-zA-Z0-9_-]/g, "_");
     await db.query(
       `
-        UPSERT type::thing('worktree', $key) CONTENT {
+        UPSERT type::record('worktree', $key) CONTENT {
           path: $path,
           branch: $branch,
           repo: $repo,

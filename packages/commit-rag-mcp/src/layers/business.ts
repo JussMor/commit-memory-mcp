@@ -2,6 +2,17 @@ import { getDb } from "../db/client.js";
 
 type SurrealResult = unknown[];
 
+function getLastDefinedResult<T>(result: SurrealResult): T | undefined {
+  for (let index = result.length - 1; index >= 0; index -= 1) {
+    const value = result[index];
+    if (value !== null && value !== undefined) {
+      return value as T;
+    }
+  }
+
+  return undefined;
+}
+
 export async function getModuleKnowledge(moduleName: string): Promise<string> {
   const db = await getDb();
 
@@ -23,7 +34,7 @@ export async function getModuleKnowledge(moduleName: string): Promise<string> {
         recent_prs: (
           SELECT number, title, author, merged_at
           FROM pr
-          WHERE $mod.id INSIDE (SELECT module FROM belongs_to WHERE in = id)
+          WHERE id INSIDE (SELECT VALUE in FROM belongs_to WHERE out = $mod.id)
           ORDER BY merged_at DESC
           LIMIT 5
         )
@@ -32,7 +43,7 @@ export async function getModuleKnowledge(moduleName: string): Promise<string> {
     { name: moduleName },
   )) as SurrealResult;
 
-  return JSON.stringify(result[0] ?? {}, null, 2);
+  return JSON.stringify(getLastDefinedResult(result) ?? {}, null, 2);
 }
 
 export async function getModuleGraph(moduleName: string): Promise<string> {
@@ -52,7 +63,7 @@ export async function getModuleGraph(moduleName: string): Promise<string> {
     { name: moduleName },
   )) as SurrealResult;
 
-  return JSON.stringify(result[0] ?? {}, null, 2);
+  return JSON.stringify(getLastDefinedResult(result) ?? {}, null, 2);
 }
 
 export async function promoteContextFacts(
@@ -80,7 +91,16 @@ export async function promoteContextFacts(
     { name: moduleName, pr_number: prNumber ?? null },
   )) as SurrealResult;
 
-  return JSON.stringify({ promoted: result[0] ?? 0 }, null, 2);
+  const promotedRows =
+    getLastDefinedResult<Array<{ promoted?: number }>>(result);
+  const promoted = Array.isArray(promotedRows)
+    ? promotedRows.reduce(
+        (maxPromoted, row) => Math.max(maxPromoted, row.promoted ?? 0),
+        0,
+      )
+    : 0;
+
+  return JSON.stringify({ promoted }, null, 2);
 }
 
 export async function buildContextPack(
@@ -97,7 +117,7 @@ export async function buildContextPack(
         module: $mod.name,
         status: $mod.status,
         business_context: (
-          SELECT summary, rationale
+          SELECT summary, rationale, created_at
           FROM business_fact
           WHERE module = $mod.id AND status = 'promoted'
           ORDER BY created_at DESC
@@ -110,7 +130,7 @@ export async function buildContextPack(
         recent_decisions: (
           SELECT title, body, merged_at
           FROM pr
-          WHERE $mod.id INSIDE (SELECT module FROM belongs_to WHERE in = id)
+          WHERE id INSIDE (SELECT VALUE in FROM belongs_to WHERE out = $mod.id)
           ORDER BY merged_at DESC
           LIMIT 3
         )
@@ -119,7 +139,7 @@ export async function buildContextPack(
     { name: moduleName, limit },
   )) as SurrealResult;
 
-  return JSON.stringify(result[0] ?? {}, null, 2);
+  return JSON.stringify(getLastDefinedResult(result) ?? {}, null, 2);
 }
 
 export async function prePlanSyncBrief(
@@ -134,7 +154,7 @@ export async function prePlanSyncBrief(
         LET $mod = (SELECT * FROM module WHERE name = $name LIMIT 1)[0];
         RETURN {
           facts: (
-            SELECT summary, rationale FROM business_fact
+            SELECT summary, rationale, created_at FROM business_fact
             WHERE module = $mod.id AND status = 'promoted'
             ORDER BY created_at DESC LIMIT 5
           ),
@@ -151,7 +171,7 @@ export async function prePlanSyncBrief(
         SELECT number, title, author, merged_at
         FROM pr
         WHERE repo = $repo
-          AND merged_at > time::now() - duration::from::hours(24)
+          AND merged_at > time::now() - duration::from_hours(24)
           AND state = 'merged'
         ORDER BY merged_at DESC
       `,
@@ -162,7 +182,7 @@ export async function prePlanSyncBrief(
   return JSON.stringify(
     {
       module: moduleName,
-      business_context: businessResult[0] ?? {},
+      business_context: getLastDefinedResult(businessResult) ?? {},
       overnight_prs: overnightResult[0] ?? [],
     },
     null,

@@ -11,6 +11,9 @@ type GhPr = {
   state: string;
   files: Array<{ path: string }>;
   labels: Array<{ name: string }>;
+  commits?: Array<
+    { oid?: string | null } | { commit?: { oid?: string | null } }
+  >;
 };
 
 function parseRepo(repo: string): { owner: string; name: string } {
@@ -31,6 +34,39 @@ function makeModuleRecordId(moduleName: string): string {
   return `module:${safeName}`;
 }
 
+function toDateOrNull(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function extractCommitShas(commits: GhPr["commits"]): string[] {
+  if (!Array.isArray(commits)) {
+    return [];
+  }
+
+  return commits
+    .map((commit) => {
+      if ("oid" in commit && typeof commit.oid === "string") {
+        return commit.oid;
+      }
+
+      if (
+        "commit" in commit &&
+        commit.commit &&
+        typeof commit.commit.oid === "string"
+      ) {
+        return commit.commit.oid;
+      }
+
+      return null;
+    })
+    .filter((sha): sha is string => Boolean(sha));
+}
+
 export function fetchPrFromGh(repo: string, prNumber: number): GhPr {
   const { owner, name } = parseRepo(repo);
   const data = runGh([
@@ -40,7 +76,7 @@ export function fetchPrFromGh(repo: string, prNumber: number): GhPr {
     "--repo",
     `${owner}/${name}`,
     "--json",
-    "number,title,body,author,baseRefName,mergedAt,state,files,labels",
+    "number,title,body,author,baseRefName,mergedAt,state,files,labels,commits",
   ]);
   return JSON.parse(data) as GhPr;
 }
@@ -53,7 +89,7 @@ export async function ingestPr(repo: string, prNumber: number): Promise<void> {
 
   await db.query(
     `
-      UPSERT type::thing('pr', $prKey) CONTENT {
+      UPSERT type::record('pr', $prKey) CONTENT {
         repo: $repo,
         number: $number,
         title: $title,
@@ -64,6 +100,7 @@ export async function ingestPr(repo: string, prNumber: number): Promise<void> {
         state: $state,
         files: $files,
         labels: $labels,
+        commits: $commits,
         synced_at: time::now()
       }
     `,
@@ -75,10 +112,11 @@ export async function ingestPr(repo: string, prNumber: number): Promise<void> {
       body: pr.body,
       author: pr.author.login,
       base_branch: pr.baseRefName,
-      merged_at: pr.mergedAt,
+      merged_at: toDateOrNull(pr.mergedAt),
       state: pr.state,
       files: pr.files.map((f) => f.path),
       labels: pr.labels.map((l) => l.name),
+      commits: extractCommitShas(pr.commits),
     },
   );
 
@@ -100,24 +138,31 @@ export async function extractBusinessFacts(
 
   await db.query(
     `
-      UPSERT type::thing('module', $moduleKey) SET
+      UPSERT type::record('module', $moduleKey) SET
         name = $name,
+        description = '',
         updated_at = time::now()
     `,
     { moduleKey, name: moduleName },
   );
 
-  const summary = extractSection(pr.body ?? "", "Summary|What does this PR do");
-  const rationale = extractSection(pr.body ?? "", "Why|Motivation|Decision");
+  const body = pr.body ?? "";
+  const summary =
+    extractSection(body, "Summary|What does this PR do") ??
+    extractFallbackSummary(body) ??
+    pr.title.trim();
+  const rationale =
+    extractSection(body, "Why|Motivation|Decision") ??
+    extractFallbackRationale(body);
 
   if (summary) {
     await db.query(
       `
         CREATE business_fact CONTENT {
-          module: type::thing('module', $moduleKey),
+          module: type::record('module', $moduleKey),
           summary: $summary,
           rationale: $rationale,
-          source_pr: type::thing('pr', $prKey),
+          source_pr: type::record('pr', $prKey),
           status: 'draft',
           created_at: time::now()
         }
@@ -133,7 +178,9 @@ export async function extractBusinessFacts(
 
   await db.query(
     `
-      RELATE type::thing('pr', $prKey) -> belongs_to -> type::thing('module', $moduleKey)
+      LET $pr = type::record('pr', $prKey);
+      LET $module = type::record('module', $moduleKey);
+      RELATE $pr -> belongs_to -> $module;
     `,
     { prKey, moduleKey },
   );
@@ -150,4 +197,34 @@ function extractSection(body: string, headingPattern: string): string | null {
   );
   const match = body.match(regex);
   return match?.[2]?.trim() ?? null;
+}
+
+function extractFallbackSummary(body: string): string | null {
+  const lines = normalizeBodyLines(body);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return lines.slice(0, 3).join(" ");
+}
+
+function extractFallbackRationale(body: string): string {
+  const lines = normalizeBodyLines(body);
+  if (lines.length <= 1) {
+    return "";
+  }
+
+  return lines.slice(1, 4).join(" ");
+}
+
+function normalizeBodyLines(body: string): string[] {
+  return body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !line.startsWith("#"))
+    .filter((line) => !/^<img\b/i.test(line))
+    .map((line) => line.replace(/^[-*+]\s+/, ""))
+    .map((line) => line.replace(/!\[[^\]]*\]\([^)]*\)/g, "").trim())
+    .filter((line) => line.length > 0);
 }
