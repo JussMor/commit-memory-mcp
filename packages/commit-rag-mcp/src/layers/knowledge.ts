@@ -83,6 +83,69 @@ function makeContentHash(value: string): string {
   return createHash("sha1").update(value, "utf8").digest("hex");
 }
 
+function makeMemoryChunkKey(
+  moduleName: string,
+  topicKey: string,
+  sourceRef: string,
+  partKey: string,
+): string {
+  return createHash("sha1")
+    .update(
+      `${moduleName}|${topicKey}|${sourceRef}|knowledge_note|${partKey}`,
+      "utf8",
+    )
+    .digest("hex");
+}
+
+function splitKnowledgeDetails(details: string): string[] {
+  const lines = details
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !line.startsWith("#"))
+    .map((line) => line.replace(/^[-*+]\s+/, ""));
+
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  let current = "";
+  const maxChunkLength = 420;
+
+  for (const line of lines) {
+    const candidate = current ? `${current} ${line}` : line;
+    if (candidate.length <= maxChunkLength) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+    }
+
+    if (line.length <= maxChunkLength) {
+      current = line;
+      continue;
+    }
+
+    // Hard-wrap very long lines so retrieval snippets remain readable.
+    for (let index = 0; index < line.length; index += maxChunkLength) {
+      const part = line.slice(index, index + maxChunkLength).trim();
+      if (part) {
+        chunks.push(part);
+      }
+    }
+    current = "";
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks.slice(0, 6);
+}
+
 function getFirstResult<T>(result: SurrealResult): T | undefined {
   const first = result[0];
   if (!Array.isArray(first)) {
@@ -158,6 +221,93 @@ async function upsertMentionsModuleLinks(
         err instanceof Error ? err.message : String(err),
       );
     }
+  }
+}
+
+async function upsertKnowledgeMemoryChunk(options: {
+  db: Awaited<ReturnType<typeof getDb>>;
+  moduleKey: string;
+  moduleName: string;
+  topicKey: string;
+  summary: string;
+  details: string;
+  tags: string[];
+  sourceType: string;
+  sourceRef: string;
+  confidence: number;
+}): Promise<void> {
+  const content = options.details.trim();
+  const summary = options.summary.trim();
+
+  if (!summary && !content) {
+    return;
+  }
+
+  const detailChunks = splitKnowledgeDetails(content);
+  const chunks = [
+    {
+      partKey: "summary",
+      kind: "knowledge_note_summary",
+      summary,
+      content: summary,
+      importance: 0.85,
+    },
+    ...detailChunks.map((detailChunk, index) => ({
+      partKey: `detail_${index + 1}`,
+      kind: "knowledge_note_detail",
+      summary,
+      content: detailChunk,
+      importance: 0.7,
+    })),
+  ];
+
+  for (const chunk of chunks) {
+    const chunkKey = makeMemoryChunkKey(
+      options.moduleName,
+      options.topicKey,
+      options.sourceRef,
+      chunk.partKey,
+    );
+    const searchText = [chunk.summary, chunk.content, options.tags.join(" ")]
+      .join("\n")
+      .trim();
+    const embedding = await makeEmbedding(searchText);
+
+    await options.db.query(
+      `
+        UPSERT type::record('memory_chunk', $chunkKey) CONTENT {
+          module: type::record('module', $moduleKey),
+          source_pr: NONE,
+          kind: $kind,
+          source_type: $source_type,
+          source_ref: $source_ref,
+          summary: $summary,
+          content: $content,
+          search_text: $search_text,
+          embedding: $embedding,
+          tags: $tags,
+          confidence: $confidence,
+          importance: $importance,
+          status: 'active',
+          created_at: time::now(),
+          updated_at: time::now()
+        }
+      `,
+      {
+        chunkKey,
+        moduleKey: options.moduleKey,
+        kind: chunk.kind,
+        source_type: options.sourceType,
+        source_ref: options.sourceRef,
+        summary: chunk.summary,
+        content: chunk.content,
+        search_text: searchText,
+        embedding,
+        tags: options.tags,
+        confidence: Math.max(0, Math.min(1, options.confidence)),
+        importance: chunk.importance,
+      },
+    );
   }
 }
 
@@ -282,6 +432,19 @@ export async function ingestKnowledgeInvestigation(
       relatedModuleRecords,
     );
 
+    await upsertKnowledgeMemoryChunk({
+      db,
+      moduleKey: moduleRecord.key,
+      moduleName,
+      topicKey,
+      summary,
+      details,
+      tags: mergedTags,
+      sourceType,
+      sourceRef,
+      confidence,
+    });
+
     return {
       action: "refreshed",
       module: moduleName,
@@ -380,6 +543,19 @@ export async function ingestKnowledgeInvestigation(
     relatedModules,
     relatedModuleRecords,
   );
+
+  await upsertKnowledgeMemoryChunk({
+    db,
+    moduleKey: moduleRecord.key,
+    moduleName,
+    topicKey,
+    summary,
+    details,
+    tags,
+    sourceType,
+    sourceRef,
+    confidence,
+  });
 
   return {
     action: "created",

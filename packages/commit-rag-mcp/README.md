@@ -20,6 +20,40 @@ This server lets coding agents answer:
 - what merged recently on main
 - what business context to load before planning
 
+## Architecture
+
+This package is organized as a layered MCP server:
+
+- Entry/runtime: `src/index.ts` starts the server, runs schema migrations, registers tools, and connects via stdio transport.
+- Tool surface: `src/tools/index.ts` defines all MCP tools and maps each tool to a single orchestration function.
+- Domain layers: `src/layers/*` contains business logic grouped by concern:
+  - `ingest.ts`: PR ingestion and fact extraction
+  - `business.ts`: knowledge retrieval, lineage, search, and planning briefs
+  - `coordination.ts`: decision logs, stale knowledge checks, team/activity summaries, cross-module impact
+  - `trazability.ts`: repository/PR traceability lookups
+- Data layer: `src/db/*` manages SurrealDB connection and schema migrations (document, relation, and vector indexes).
+- External integrations:
+  - GitHub/PR sync in `src/pr/sync.ts`
+  - Git/worktree intelligence in `src/git/*`
+  - Embeddings and hybrid retrieval in `src/search/*`
+
+Request flow (high-level):
+
+1. MCP client calls a tool over stdio.
+2. Tool handler in `src/tools/index.ts` validates input with Zod and dispatches to a layer function.
+3. Layer function reads/writes SurrealDB records and relation edges, optionally fetching GitHub or local git context.
+4. Search paths combine BM25 full-text and HNSW vector similarity, then re-rank for final response quality.
+5. Handler returns structured text payload to the MCP client.
+
+Data model (SurrealDB):
+
+- Core records: `pr`, `commit`, `module`, `business_fact`, `memory_chunk`, `knowledge_note`, `commit_chunk`, `worktree`.
+- Relation tables: `affects`, `required_by`, `belongs_to`, `part_of`, `supersedes`, `mentions_module`.
+- Retrieval primitives:
+  - Full-text analyzer + BM25 indexes for lexical matching
+  - HNSW vector indexes (384-dim) for semantic matching
+  - Hybrid ranking across semantic score, keyword overlap, and confidence signals
+
 ## Tools
 
 - `sync_pr_context`

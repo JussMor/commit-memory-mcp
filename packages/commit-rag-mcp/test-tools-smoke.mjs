@@ -84,7 +84,7 @@ async function main() {
     Number(process.env.SMOKE_PR_NUMBER || "") || resolveLatestMergedPr(repo);
 
   // SurrealDB connection config (matching getDb() from dist)
-  const surrealUrl = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
+  const surrealUrl = process.env.SURREAL_URL ?? "wss://tiny-castle-06ekdrmp2dssb3v1golua9pue0.aws-usw2.surreal.cloud/rpc";
   const surrealUser = process.env.SURREAL_USER ?? "root";
   const surrealNs = process.env.SURREAL_NS ?? "main";
   const surrealDb = process.env.SURREAL_DB ?? "main";
