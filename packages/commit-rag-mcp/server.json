@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.jussmor/commit-memory",
+  "name": "io.github.jussmor/commit-memory-surreal",
   "description": "Commit-aware MCP server with SurrealDB-backed traceability, PR context sync, and business knowledge tools.",
   "repository": {
     "url": "https://github.com/JussMor/commit-memory-mcp",
     "source": "github"
   },
-  "version": "2.0.0",
+  "version": "0.1.0",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@jussmor/commit-memory-mcp",
-      "version": "2.0.0",
+      "identifier": "@jussmor/commit-memory-mcp-surreal",
+      "version": "0.1.0",
       "transport": {
         "type": "stdio"
       },
