@@ -246,11 +246,13 @@ export async function getStaleKnowledge(
         stale_business_facts: $stale_facts,
         stale_knowledge_notes: $stale_knowledge,
         recent_pr_activity: $recent_prs,
-        risk: IF count($stale_facts) > 0 AND count($recent_prs) > 0
-          THEN 'HIGH — stale rules exist but module has recent PR activity'
-          ELSE IF count($stale_facts) > 0
-          THEN 'MEDIUM — stale rules but no recent changes'
-          ELSE 'LOW — knowledge is up to date'
+        risk: IF count($stale_facts) > 0 AND count($recent_prs) > 0 {
+          'HIGH — stale rules exist but module has recent PR activity'
+        } ELSE IF count($stale_facts) > 0 {
+          'MEDIUM — stale rules but no recent changes'
+        } ELSE {
+          'LOW — knowledge is up to date'
+        }
       }
     `,
     { name: module, days },
