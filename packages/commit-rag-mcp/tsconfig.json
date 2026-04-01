@@ -11,5 +11,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": [
+    "src/index.ts",
+    "src/db/**/*.ts",
+    "src/layers/**/*.ts",
+    "src/tools/**/*.ts"
+  ]
 }

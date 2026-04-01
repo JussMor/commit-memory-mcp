@@ -4,15 +4,21 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "${workspaceFolder}/packages/commit-rag-mcp/dist/mcp/server.js"
+        "${workspaceFolder}/packages/commit-rag-mcp/dist/index.js"
       ],
       "env": {
-        "COMMIT_RAG_REPO": "/Users/jussmor/Developer/maxwellclinic/EverBetter-Pro",
-        "COMMIT_RAG_DB": "/Users/jussmor/Developer/maxwellclinic/EverBetter-Pro/.commit-rag.db",
-        "COMMIT_RAG_LIMIT": "400",
-        "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
-        "OLLAMA_EMBED_MODEL": "nomic-embed-text"
+        "SURREAL_URL": "wss://tiny-castle-06ekdrmp2dssb3v1golua9pue0.aws-usw2.surreal.cloud/rpc",
+        "SURREAL_USER": "root",
+        "SURREAL_PASS": "root",
+        "SURREAL_NS": "main",
+        "SURREAL_DB": "main"
       }
+    },
+    "SurrealDB": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/scripts/run-surrealmcp.sh",
+      "args": [
+      ]
     }
   }
 }
