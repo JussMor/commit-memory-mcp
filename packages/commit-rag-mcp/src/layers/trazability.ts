@@ -1,6 +1,78 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getDb } from "../db/client.js";
 import { runGh } from "./gh.js";
+
+let cachedGitRoot: string | null | undefined;
+
+function listAncestorDirs(start: string): string[] {
+  const dirs: string[] = [];
+  let current = start;
+
+  while (true) {
+    dirs.push(current);
+
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+
+    current = parent;
+  }
+
+  return dirs;
+}
+
+function resolveGitRoot(): string | null {
+  if (cachedGitRoot !== undefined) {
+    return cachedGitRoot;
+  }
+
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    ...listAncestorDirs(process.cwd()),
+    ...listAncestorDirs(moduleDir),
+  ];
+
+  for (const dir of candidates) {
+    try {
+      const root = execFileSync(
+        "git",
+        ["-C", dir, "rev-parse", "--show-toplevel"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      ).trim();
+
+      if (root) {
+        cachedGitRoot = root;
+        return root;
+      }
+    } catch {
+      // Keep searching parent directories until we find a git working tree.
+    }
+  }
+
+  cachedGitRoot = null;
+  return cachedGitRoot;
+}
+
+function runGit(args: string[]): string {
+  const root = resolveGitRoot();
+
+  if (!root) {
+    throw new Error(
+      "No local git repository found for this process. Start the MCP server from a repository checkout.",
+    );
+  }
+
+  return execFileSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
 
 function parseRepo(repo: string): { owner: string; name: string } {
   const [owner, name] = repo.split("/");
@@ -248,12 +320,27 @@ export async function whoChangedThis(
 
   const rows = ((result as unknown[])[0] as unknown[]) ?? [];
 
-  const gitLog = execSync(
-    `git log --follow --format="%h %an %ar %s" -10 -- "${file}"`,
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-  ).trim();
+  let gitLog = "";
+  let gitLogError: string | null = null;
 
-  return JSON.stringify({ prs: rows, git_log: gitLog }, null, 2);
+  try {
+    gitLog = runGit([
+      "log",
+      "--follow",
+      "--format=%h %an %ar %s",
+      "-10",
+      "--",
+      file,
+    ]).trim();
+  } catch (error) {
+    gitLogError = error instanceof Error ? error.message : String(error);
+  }
+
+  return JSON.stringify(
+    { prs: rows, git_log: gitLog, git_log_error: gitLogError },
+    null,
+    2,
+  );
 }
 
 export async function whyWasThisChanged(
@@ -370,10 +457,7 @@ export async function getOvernightBrief(
 export async function listActiveWorktrees(): Promise<string> {
   const db = await getDb();
 
-  const raw = execSync("git worktree list --porcelain", {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const raw = runGit(["worktree", "list", "--porcelain"]);
   const worktrees = parseWorktrees(raw);
 
   for (const wt of worktrees) {
@@ -403,10 +487,7 @@ export async function listActiveWorktrees(): Promise<string> {
 function parseWorktrees(
   raw: string,
 ): Array<{ path: string; branch: string; repo: string }> {
-  const remote = execSync("git remote get-url origin", {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  const remote = runGit(["remote", "get-url", "origin"]).trim();
 
   return raw
     .trim()
