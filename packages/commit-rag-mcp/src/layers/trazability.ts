@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import { getDb } from "../db/client.js";
+import { runGh } from "./gh.js";
 
 function parseRepo(repo: string): { owner: string; name: string } {
   const [owner, name] = repo.split("/");
@@ -18,10 +19,18 @@ export async function syncPrContext(repo: string, limit = 20): Promise<string> {
   const db = await getDb();
   const { owner, name } = parseRepo(repo);
 
-  const raw = execSync(
-    `gh pr list --repo ${owner}/${name} --state merged --limit ${limit} --json number,title,author,mergedAt,baseRefName`,
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const raw = runGh([
+    "pr",
+    "list",
+    "--repo",
+    `${owner}/${name}`,
+    "--state",
+    "merged",
+    "--limit",
+    String(limit),
+    "--json",
+    "number,title,author,mergedAt,baseRefName",
+  ]);
 
   const prs = JSON.parse(raw) as Array<{
     number: number;

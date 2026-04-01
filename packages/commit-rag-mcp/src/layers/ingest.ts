@@ -1,5 +1,5 @@
-import { execSync } from "node:child_process";
 import { getDb } from "../db/client.js";
+import { runGh } from "./gh.js";
 
 type GhPr = {
   number: number;
@@ -33,11 +33,15 @@ function makeModuleRecordId(moduleName: string): string {
 
 export function fetchPrFromGh(repo: string, prNumber: number): GhPr {
   const { owner, name } = parseRepo(repo);
-  const cmd = `gh pr view ${prNumber} --repo ${owner}/${name} --json number,title,body,author,baseRefName,mergedAt,state,files,labels`;
-  const data = execSync(cmd, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const data = runGh([
+    "pr",
+    "view",
+    String(prNumber),
+    "--repo",
+    `${owner}/${name}`,
+    "--json",
+    "number,title,body,author,baseRefName,mergedAt,state,files,labels",
+  ]);
   return JSON.parse(data) as GhPr;
 }
 
