@@ -1,8 +1,8 @@
 {
   "name": "@jussmor/commit-memory-mcp-surreal",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "mcpName": "io.github.jussmor/commit-memory-surreal",
-  "description": "Commit-aware MCP with SurrealDB-backed traceability and business knowledge tools",
+  "description": "Commit-aware MCP with SurrealDB-backed traceability, async team coordination, and business knowledge tools",
   "license": "MIT",
   "repository": {
     "type": "git",
