@@ -103,8 +103,107 @@ function toDateOrNull(value: string | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export async function syncPrContext(repo: string, limit = 20): Promise<string> {
+function normalizeHours(hours: number): number {
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return 12;
+  }
+
+  return Math.floor(hours);
+}
+
+function mergedAfterHours(mergedAt: string | null, hours: number): boolean {
+  if (!mergedAt) {
+    return false;
+  }
+
+  const mergedDate = new Date(mergedAt);
+  if (Number.isNaN(mergedDate.getTime())) {
+    return false;
+  }
+
+  const cutoff = Date.now() - hours * 60 * 60 * 1000;
+  return mergedDate.getTime() >= cutoff;
+}
+
+function estimateSyncLimit(hours: number): number {
+  const estimated = Math.max(30, hours * 12);
+  return Math.min(estimated, 200);
+}
+
+async function upsertPullRequest(
+  repo: string,
+  prNumber: number,
+): Promise<void> {
   const db = await getDb();
+  const detail = fetchPullRequestDetail(repo, prNumber);
+
+  await db.query(
+    `
+      UPSERT type::record('pr', $key) CONTENT {
+        repo: $repo,
+        number: $number,
+        title: $title,
+        body: $body,
+        author: $author,
+        merged_at: $merged_at,
+        base_branch: $base_branch,
+        files: $files,
+        labels: $labels,
+        commits: $commits,
+        state: 'merged',
+        synced_at: time::now()
+      }
+    `,
+    {
+      key: makePrKey(repo, prNumber),
+      repo,
+      number: prNumber,
+      title: detail.title,
+      body: detail.body ?? "",
+      author: detail.author?.login ?? "unknown",
+      merged_at: toDateOrNull(detail.mergedAt),
+      base_branch: detail.baseRefName,
+      files: extractFiles(detail.files),
+      labels: extractLabels(detail.labels),
+      commits: extractCommitShas(detail.commits),
+    },
+  );
+}
+
+async function syncMainBranchOvernightPrs(
+  repo: string,
+  hours: number,
+): Promise<{ scanned: number; synced: number }> {
+  const { owner, name } = parseRepo(repo);
+  const raw = runGh([
+    "pr",
+    "list",
+    "--repo",
+    `${owner}/${name}`,
+    "--state",
+    "merged",
+    "--base",
+    "main",
+    "--limit",
+    String(estimateSyncLimit(hours)),
+    "--json",
+    "number,mergedAt",
+  ]);
+
+  const prs = JSON.parse(raw) as Array<{
+    number: number;
+    mergedAt: string | null;
+  }>;
+  const overnight = prs.filter((pr) => mergedAfterHours(pr.mergedAt, hours));
+
+  for (const pr of overnight) {
+    await upsertPullRequest(repo, pr.number);
+  }
+
+  return { scanned: prs.length, synced: overnight.length };
+}
+
+export async function syncPrContext(repo: string, limit = 20): Promise<string> {
   const { owner, name } = parseRepo(repo);
 
   const raw = runGh([
@@ -123,39 +222,7 @@ export async function syncPrContext(repo: string, limit = 20): Promise<string> {
   const prs = JSON.parse(raw) as PullRequestListItem[];
 
   for (const pr of prs) {
-    const detail = fetchPullRequestDetail(repo, pr.number);
-
-    await db.query(
-      `
-        UPSERT type::record('pr', $key) CONTENT {
-          repo: $repo,
-          number: $number,
-          title: $title,
-          body: $body,
-          author: $author,
-          merged_at: $merged_at,
-          base_branch: $base_branch,
-          files: $files,
-          labels: $labels,
-          commits: $commits,
-          state: 'merged',
-          synced_at: time::now()
-        }
-      `,
-      {
-        key: makePrKey(repo, pr.number),
-        repo,
-        number: pr.number,
-        title: detail.title,
-        body: detail.body ?? "",
-        author: detail.author?.login ?? "unknown",
-        merged_at: toDateOrNull(detail.mergedAt),
-        base_branch: detail.baseRefName,
-        files: extractFiles(detail.files),
-        labels: extractLabels(detail.labels),
-        commits: extractCommitShas(detail.commits),
-      },
-    );
+    await upsertPullRequest(repo, pr.number);
   }
 
   return `Synced ${prs.length} PRs for ${repo}`;
@@ -242,6 +309,36 @@ export async function getOvernightBrief(
   repo: string,
   hours = 12,
 ): Promise<string> {
+  const normalizedHours = normalizeHours(hours);
+
+  let syncSummary: {
+    attempted: true;
+    scanned: number;
+    synced: number;
+    error?: string;
+  } = {
+    attempted: true,
+    scanned: 0,
+    synced: 0,
+  };
+
+  try {
+    const summary = await syncMainBranchOvernightPrs(repo, normalizedHours);
+    syncSummary = {
+      attempted: true,
+      scanned: summary.scanned,
+      synced: summary.synced,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    syncSummary = {
+      attempted: true,
+      scanned: 0,
+      synced: 0,
+      error: message,
+    };
+  }
+
   const db = await getDb();
 
   const result = await db.query(
@@ -249,15 +346,25 @@ export async function getOvernightBrief(
       SELECT number, title, author, merged_at
       FROM pr
       WHERE repo = $repo
+        AND base_branch = 'main'
         AND merged_at > time::now() - duration::from_hours($hours)
         AND state = 'merged'
       ORDER BY merged_at DESC
     `,
-    { repo, hours },
+    { repo, hours: normalizedHours },
   );
 
   const prs = ((result as unknown[])[0] as unknown[]) ?? [];
-  return JSON.stringify({ hours, repo, merged_prs: prs }, null, 2);
+  return JSON.stringify(
+    {
+      hours: normalizedHours,
+      repo,
+      sync: syncSummary,
+      merged_prs: prs,
+    },
+    null,
+    2,
+  );
 }
 
 export async function listActiveWorktrees(): Promise<string> {
