@@ -1,4 +1,9 @@
 const FALLBACK_DIMENSION = 384;
+const DEFAULT_OPEN_MODEL = "Xenova/all-MiniLM-L6-v2";
+
+let extractorPromise: Promise<
+  ((text: string, options?: Record<string, unknown>) => Promise<unknown>) | null
+> | null = null;
 
 function hashToken(token: string): number {
   let hash = 2166136261;
@@ -36,7 +41,73 @@ function fallbackEmbedding(text: string): number[] {
   return normalize(vector);
 }
 
+function vectorFromExtractorOutput(payload: unknown): number[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const maybeData = payload as { data?: unknown };
+  if (!maybeData.data || typeof maybeData.data !== "object") {
+    return [];
+  }
+
+  const data = maybeData.data as ArrayLike<number>;
+  const values = Array.from(data, (value) => Number(value));
+  return values.filter((value) => Number.isFinite(value));
+}
+
+async function getOpenSourceExtractor(): Promise<
+  ((text: string, options?: Record<string, unknown>) => Promise<unknown>) | null
+> {
+  if (!extractorPromise) {
+    extractorPromise = (async () => {
+      try {
+        const transformers = await import("@xenova/transformers");
+        const pipeline = transformers.pipeline as unknown as (
+          task: string,
+          model: string,
+        ) => Promise<
+          (text: string, options?: Record<string, unknown>) => Promise<unknown>
+        >;
+
+        const model = process.env.COMMIT_RAG_EMBED_MODEL ?? DEFAULT_OPEN_MODEL;
+        return await pipeline("feature-extraction", model);
+      } catch (error) {
+        console.warn(
+          "[embed] Open-source model unavailable, falling back:",
+          error,
+        );
+        return null;
+      }
+    })();
+  }
+
+  return extractorPromise;
+}
+
+async function embedWithOpenSourceModel(
+  text: string,
+): Promise<number[] | null> {
+  if (process.env.COMMIT_RAG_DISABLE_LOCAL_EMBEDDINGS === "1") {
+    return null;
+  }
+
+  const extractor = await getOpenSourceExtractor();
+  if (!extractor) {
+    return null;
+  }
+
+  const output = await extractor(text, { pooling: "mean", normalize: true });
+  const vector = vectorFromExtractorOutput(output);
+  return vector.length > 0 ? normalize(vector) : null;
+}
+
 export async function embedText(text: string): Promise<number[]> {
+  const openSourceVector = await embedWithOpenSourceModel(text);
+  if (openSourceVector) {
+    return openSourceVector;
+  }
+
   const model = process.env.OLLAMA_EMBED_MODEL;
   if (!model) {
     return fallbackEmbedding(text);
@@ -94,8 +165,8 @@ export async function callOllamaLlm(prompt: string): Promise<string | null> {
 }
 
 export function getExpectedDimension(): number {
-  return process.env.OLLAMA_EMBED_MODEL
-    ? Number.parseInt(process.env.COMMIT_RAG_DIMENSION ?? "", 10) ||
-        FALLBACK_DIMENSION
-    : FALLBACK_DIMENSION;
+  return (
+    Number.parseInt(process.env.COMMIT_RAG_DIMENSION ?? "", 10) ||
+    FALLBACK_DIMENSION
+  );
 }

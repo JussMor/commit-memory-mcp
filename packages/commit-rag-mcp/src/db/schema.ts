@@ -4,6 +4,12 @@ export async function runMigrations(): Promise<void> {
   const db = await getDb();
 
   await db.query(`
+    DEFINE ANALYZER IF NOT EXISTS commit_memory_text
+      TOKENIZERS blank, class, punct
+      FILTERS lowercase, snowball(english);
+  `);
+
+  await db.query(`
     DEFINE TABLE IF NOT EXISTS pr SCHEMALESS PERMISSIONS NONE;
 
     DEFINE FIELD IF NOT EXISTS repo ON pr TYPE string;
@@ -65,8 +71,44 @@ export async function runMigrations(): Promise<void> {
     DEFINE FIELD IF NOT EXISTS summary ON business_fact TYPE string;
     DEFINE FIELD IF NOT EXISTS rationale ON business_fact TYPE string;
     DEFINE FIELD IF NOT EXISTS source_pr ON business_fact TYPE record<pr>;
+    DEFINE FIELD IF NOT EXISTS source_type ON business_fact TYPE string DEFAULT 'pr';
+    DEFINE FIELD IF NOT EXISTS search_text ON business_fact TYPE string;
+    DEFINE FIELD IF NOT EXISTS embedding ON business_fact TYPE array<number>;
     DEFINE FIELD IF NOT EXISTS status ON business_fact TYPE string DEFAULT 'draft';
+    DEFINE FIELD IF NOT EXISTS confidence ON business_fact TYPE number DEFAULT 0.8;
     DEFINE FIELD IF NOT EXISTS created_at ON business_fact TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON business_fact TYPE datetime DEFAULT time::now();
+
+    DEFINE INDEX IF NOT EXISTS business_fact_fts
+      ON TABLE business_fact COLUMNS search_text FULLTEXT ANALYZER commit_memory_text BM25;
+    DEFINE INDEX IF NOT EXISTS business_fact_embedding_idx
+      ON TABLE business_fact COLUMNS embedding HNSW DIMENSION 384 DIST COSINE TYPE F32;
+  `);
+
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS memory_chunk SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS module ON memory_chunk TYPE record<module>;
+    DEFINE FIELD IF NOT EXISTS source_pr ON memory_chunk TYPE option<record<pr>>;
+    DEFINE FIELD IF NOT EXISTS kind ON memory_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS source_type ON memory_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS source_ref ON memory_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS summary ON memory_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS content ON memory_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS search_text ON memory_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS embedding ON memory_chunk TYPE array<number>;
+    DEFINE FIELD IF NOT EXISTS tags ON memory_chunk TYPE array<string>;
+    DEFINE FIELD IF NOT EXISTS confidence ON memory_chunk TYPE number DEFAULT 0.7;
+    DEFINE FIELD IF NOT EXISTS importance ON memory_chunk TYPE number DEFAULT 0.5;
+    DEFINE FIELD IF NOT EXISTS status ON memory_chunk TYPE string DEFAULT 'active';
+    DEFINE FIELD IF NOT EXISTS created_at ON memory_chunk TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON memory_chunk TYPE datetime DEFAULT time::now();
+
+    DEFINE INDEX IF NOT EXISTS memory_chunk_source_ref ON memory_chunk FIELDS source_ref;
+    DEFINE INDEX IF NOT EXISTS memory_chunk_fts
+      ON TABLE memory_chunk COLUMNS search_text FULLTEXT ANALYZER commit_memory_text BM25;
+    DEFINE INDEX IF NOT EXISTS memory_chunk_embedding_idx
+      ON TABLE memory_chunk COLUMNS embedding HNSW DIMENSION 384 DIST COSINE TYPE F32;
   `);
 
   await db.query(`

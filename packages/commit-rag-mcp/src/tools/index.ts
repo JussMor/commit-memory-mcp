@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+  agentRetrieveContext,
   buildContextPack,
   getModuleGraph,
   getModuleKnowledge,
@@ -112,9 +113,32 @@ export function registerTools(server: McpServer): void {
 
   server.tool(
     "build_context_pack",
-    { module: z.string(), limit: z.number().optional() },
-    async ({ module, limit }) => ({
-      content: [{ type: "text", text: await buildContextPack(module, limit) }],
+    {
+      module: z.string(),
+      limit: z.number().optional(),
+      query: z.string().optional(),
+    },
+    async ({ module, limit, query }) => ({
+      content: [
+        { type: "text", text: await buildContextPack(module, limit, query) },
+      ],
+    }),
+  );
+
+  server.tool(
+    "agent_retrieve_context",
+    {
+      module: z.string(),
+      query: z.string(),
+      limit: z.number().optional(),
+    },
+    async ({ module, query, limit }) => ({
+      content: [
+        {
+          type: "text",
+          text: await agentRetrieveContext(module, query, limit),
+        },
+      ],
     }),
   );
 
