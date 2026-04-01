@@ -143,7 +143,6 @@ export async function runMigrations(): Promise<void> {
   `);
 
   await db.query(`
-  await db.query(`
     DEFINE TABLE IF NOT EXISTS commit_chunk SCHEMALESS PERMISSIONS NONE;
 
     DEFINE FIELD IF NOT EXISTS chunk_id ON commit_chunk TYPE string;
