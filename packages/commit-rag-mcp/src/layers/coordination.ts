@@ -479,17 +479,28 @@ export async function linkModules(
 
   const table = relation === "affects" ? "affects" : "required_by";
 
-  await db.query(
-    `
+  // type::table($table) is not supported in RELATE in this SurrealDB Cloud
+  // version. Interpolate the table name as a literal so the query is static.
+  const relateQuery =
+    table === "affects"
+      ? `
       LET $from = type::record('module', $fromKey);
-      LET $to = type::record('module', $toKey);
-      LET $existing = (SELECT * FROM type::table($table) WHERE in = $from AND out = $to LIMIT 1)[0];
+      LET $to   = type::record('module', $toKey);
+      LET $existing = (SELECT * FROM affects WHERE in = $from AND out = $to LIMIT 1)[0];
       IF $existing = NONE {
-        RELATE $from -> type::table($table) -> $to SET created_at = time::now();
+        RELATE $from -> affects -> $to SET created_at = time::now();
       };
-    `,
-    { fromKey, toKey, table },
-  );
+    `
+      : `
+      LET $from = type::record('module', $fromKey);
+      LET $to   = type::record('module', $toKey);
+      LET $existing = (SELECT * FROM required_by WHERE in = $from AND out = $to LIMIT 1)[0];
+      IF $existing = NONE {
+        RELATE $from -> required_by -> $to SET created_at = time::now();
+      };
+    `;
+
+  await db.query(relateQuery, { fromKey, toKey });
 
   return JSON.stringify({
     linked: true,
@@ -512,31 +523,47 @@ export async function flagDecision(
 ): Promise<string> {
   const db = await getDb();
 
-  // Try knowledge_note first
+  // Split "table:key" so we can use type::record() which is supported in this
+  // Cloud version, whereas type::thing($var) is not.
+  const colonIdx = recordId.indexOf(":");
+  const recTable =
+    colonIdx !== -1 ? recordId.slice(0, colonIdx) : "knowledge_note";
+  const recKey = colonIdx !== -1 ? recordId.slice(colonIdx + 1) : recordId;
+
+  if (recTable !== "knowledge_note" && recTable !== "business_fact") {
+    throw new Error(
+      `flagDecision only supports knowledge_note or business_fact IDs, got: ${recTable}`,
+    );
+  }
+
+  // Try as knowledge_note when appropriate.
   const knResult = (await db.query(
     `
-      SELECT id, tags FROM knowledge_note WHERE id = type::thing($record_id) LIMIT 1
+      LET $rec = type::record('knowledge_note', $recKey);
+      RETURN (SELECT id, tags FROM knowledge_note WHERE id = $rec LIMIT 1)[0]
     `,
-    { record_id: recordId },
+    { recKey },
   )) as SurrealResult;
 
-  const knRow =
-    getLastDefinedResult<Array<{ id?: string; tags?: string[] }>>(knResult);
+  const knRow = getLastDefinedResult<{ id?: unknown; tags?: string[] }>(
+    knResult,
+  );
 
-  if (knRow && knRow.length > 0 && knRow[0]?.id) {
-    const existingTags: string[] = knRow[0].tags ?? [];
+  if (recTable === "knowledge_note" && knRow?.id) {
+    const existingTags: string[] = knRow.tags ?? [];
     const newTags = [
       ...new Set([...existingTags, severity, "team-decision", reason]),
     ];
 
     await db.query(
       `
-        UPDATE type::thing($record_id) SET
+        LET $rec = type::record('knowledge_note', $recKey);
+        UPDATE $rec SET
           tags = $tags,
           confidence = 0.95,
           updated_at = time::now()
       `,
-      { record_id: recordId, tags: newTags },
+      { recKey, tags: newTags },
     );
 
     return JSON.stringify({
@@ -548,15 +575,16 @@ export async function flagDecision(
     });
   }
 
-  // Try business_fact
+  // Update as business_fact
   await db.query(
     `
-      UPDATE type::thing($record_id) SET
+      LET $rec = type::record('business_fact', $recKey);
+      UPDATE $rec SET
         status = 'promoted',
         confidence = 0.95,
         updated_at = time::now()
     `,
-    { record_id: recordId },
+    { recKey },
   );
 
   return JSON.stringify({

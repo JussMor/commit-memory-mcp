@@ -143,6 +143,27 @@ export async function runMigrations(): Promise<void> {
   `);
 
   await db.query(`
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS commit_chunk SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS chunk_id ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS sha ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS author ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS date ON commit_chunk TYPE datetime;
+    DEFINE FIELD IF NOT EXISTS subject ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS body ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS file_path ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS hunk_text ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS indexed_text ON commit_chunk TYPE string;
+    DEFINE FIELD IF NOT EXISTS embedding ON commit_chunk TYPE array<number>;
+    DEFINE FIELD IF NOT EXISTS created_at ON commit_chunk TYPE datetime DEFAULT time::now();
+
+    DEFINE INDEX IF NOT EXISTS commit_chunk_id ON commit_chunk FIELDS chunk_id UNIQUE;
+    DEFINE INDEX IF NOT EXISTS commit_chunk_embedding_idx
+      ON TABLE commit_chunk COLUMNS embedding HNSW DIMENSION 384 DIST COSINE TYPE F32;
+  `);
+
+  await db.query(`
     DEFINE TABLE IF NOT EXISTS affects SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
     DEFINE TABLE IF NOT EXISTS required_by SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
     DEFINE TABLE IF NOT EXISTS belongs_to SCHEMALESS TYPE RELATION FROM pr TO module PERMISSIONS NONE;

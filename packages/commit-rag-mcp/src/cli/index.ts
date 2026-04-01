@@ -5,14 +5,12 @@ import { indexRepository } from "../indexer.js";
 
 type CliArgs = {
   repoPath: string;
-  dbPath: string;
   limit: number;
 };
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     repoPath: process.cwd(),
-    dbPath: path.resolve(process.cwd(), ".commit-rag.db"),
     limit: 400,
   };
 
@@ -21,12 +19,6 @@ function parseArgs(argv: string[]): CliArgs {
 
     if (arg === "--repo") {
       args.repoPath = path.resolve(argv[i + 1] ?? process.cwd());
-      i += 1;
-      continue;
-    }
-
-    if (arg === "--db") {
-      args.dbPath = path.resolve(argv[i + 1] ?? ".commit-rag.db");
       i += 1;
       continue;
     }

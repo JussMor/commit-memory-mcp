@@ -1,56 +1,70 @@
 import path from "node:path";
-import {
-  hasChunk,
-  openDatabase,
-  touchIndexState,
-  upsertChunk,
-} from "./db/client.js";
+import { closeDb, getDb } from "./db/client.js";
+import { runMigrations } from "./db/schema.js";
 import { extractCommitChunks } from "./git/extract.js";
 import { embedText } from "./search/embeddings.js";
 import type { IndexSummary } from "./types.js";
 
 export async function indexRepository(options: {
   repoPath: string;
-  dbPath: string;
   limit: number;
 }): Promise<IndexSummary> {
   const repoPath = path.resolve(options.repoPath);
-  const dbPath = path.resolve(options.dbPath);
+
+  await runMigrations();
+  const db = await getDb();
 
   const chunks = extractCommitChunks(repoPath, options.limit);
-  const db = openDatabase(dbPath);
 
   let indexedChunks = 0;
   let skippedChunks = 0;
   const indexedCommits = new Set<string>();
 
-  const pendingInserts: Array<{
-    chunk: (typeof chunks)[number];
-    embedding: number[];
-  }> = [];
-
   for (const chunk of chunks) {
-    if (hasChunk(db, chunk.chunkId)) {
+    const existing = await db.query<[[{ chunk_id: string }]]>(
+      "SELECT chunk_id FROM commit_chunk WHERE chunk_id = $chunk_id LIMIT 1",
+      { chunk_id: chunk.chunkId },
+    );
+
+    if (existing[0]?.[0]) {
       skippedChunks += 1;
       continue;
     }
 
     const embedding = await embedText(chunk.indexedText);
-    pendingInserts.push({ chunk, embedding });
+
+    await db.query(
+      `CREATE commit_chunk CONTENT {
+        chunk_id: $chunk_id,
+        sha: $sha,
+        author: $author,
+        date: $date,
+        subject: $subject,
+        body: $body,
+        file_path: $file_path,
+        hunk_text: $hunk_text,
+        indexed_text: $indexed_text,
+        embedding: $embedding
+      }`,
+      {
+        chunk_id: chunk.chunkId,
+        sha: chunk.sha,
+        author: chunk.author,
+        date: new Date(chunk.date),
+        subject: chunk.subject,
+        body: chunk.body,
+        file_path: chunk.filePath,
+        hunk_text: chunk.hunkText,
+        indexed_text: chunk.indexedText,
+        embedding,
+      },
+    );
+
     indexedChunks += 1;
     indexedCommits.add(chunk.sha);
   }
 
-  const writeTransaction = db.transaction((rows: typeof pendingInserts) => {
-    for (const row of rows) {
-      upsertChunk(db, row.chunk, row.embedding);
-    }
-  });
-
-  writeTransaction(pendingInserts);
-
-  touchIndexState(db);
-  db.close();
+  await closeDb();
 
   return {
     indexedCommits: indexedCommits.size,

@@ -111,6 +111,56 @@ async function ensureModule(
   return { id: `module:${moduleKey}`, key: moduleKey };
 }
 
+// Creates mentions_module graph edges from a knowledge_note to each related
+// module. Uses type::record() for safe record-ID casting, wraps each edge in
+// its own try/catch so a single bad link never aborts the whole ingestion, and
+// deduplicates by checking for an existing edge first.
+async function upsertMentionsModuleLinks(
+  db: Awaited<ReturnType<typeof getDb>>,
+  noteId: unknown,
+  relatedModuleNames: string[],
+  moduleRecords: Map<string, { id: string; key: string }>,
+): Promise<void> {
+  // noteId may be a SurrealDB SDK v2 RecordId object rather than a plain
+  // string — String() normalises either form to "table:key" before split.
+  const noteIdStr = String(noteId);
+  const colonIndex = noteIdStr.indexOf(":");
+  const noteKey =
+    colonIndex !== -1 ? noteIdStr.slice(colonIndex + 1) : noteIdStr;
+
+  for (const relatedModuleName of relatedModuleNames) {
+    const record = moduleRecords.get(relatedModuleName);
+    if (!record) {
+      continue;
+    }
+
+    try {
+      await db.query(
+        `
+          LET $noteRec = type::record('knowledge_note', $noteKey);
+          LET $modRec  = type::record('module', $moduleKey);
+          LET $existing = (
+            SELECT * FROM mentions_module
+            WHERE in = $noteRec AND out = $modRec
+            LIMIT 1
+          )[0];
+          IF $existing = NONE {
+            RELATE $noteRec -> mentions_module -> $modRec;
+          };
+        `,
+        { noteKey, moduleKey: record.key },
+      );
+    } catch (err) {
+      // Non-fatal: log and continue so a single broken edge never kills
+      // ingestion of the core knowledge note.
+      console.warn(
+        `[knowledge] mentions_module link skipped for "${relatedModuleName}":`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+}
+
 export async function ingestKnowledgeInvestigation(
   options: IngestKnowledgeOptions,
 ): Promise<{ action: string; module: string; topic: string; version: number }> {
@@ -164,7 +214,24 @@ export async function ingestKnowledgeInvestigation(
     { moduleKey: moduleRecord.key, topic_key: topicKey },
   )) as SurrealResult;
 
+  // Pre-ensure ALL related modules exist as records before any RELATE attempts.
+  // This prevents "record does not exist" errors when the module has never been
+  // ingested before and its record isn't in the DB yet.
+  const relatedModuleRecords = new Map<string, { id: string; key: string }>();
+  for (const relatedModuleName of relatedModules) {
+    relatedModuleRecords.set(
+      relatedModuleName,
+      await ensureModule(relatedModuleName),
+    );
+  }
+
   const existing = getFirstResult<KnowledgeNote>(existingResult);
+  // existing.id may be a SurrealDB SDK v2 RecordId object — normalise early.
+  if (existing) {
+    (existing as KnowledgeNote).id = existing.id
+      ? String(existing.id)
+      : undefined;
+  }
   if (existing?.id && existing.content_hash === contentHash) {
     const mergedTags = normalizeList([...(existing.tags ?? []), ...tags]);
     const mergedRelatedModules = normalizeList([
@@ -172,9 +239,15 @@ export async function ingestKnowledgeInvestigation(
       ...relatedModules,
     ]);
 
+    const existingStr = String(existing.id);
+    const existingColon = existingStr.indexOf(":");
+    const existingKey =
+      existingColon !== -1 ? existingStr.slice(existingColon + 1) : existingStr;
+
     await db.query(
       `
-        UPDATE $noteId SET
+        LET $noteRec = type::record('knowledge_note', $existingKey);
+        UPDATE $noteRec SET
           summary = $summary,
           details = $details,
           tags = $tags,
@@ -187,7 +260,7 @@ export async function ingestKnowledgeInvestigation(
           updated_at = time::now()
       `,
       {
-        noteId: existing.id,
+        existingKey,
         summary,
         details,
         tags: mergedTags,
@@ -200,6 +273,15 @@ export async function ingestKnowledgeInvestigation(
       },
     );
 
+    // Backfill any missing mentions_module edges even on a refresh so that
+    // newly added related_modules get linked without requiring a content change.
+    await upsertMentionsModuleLinks(
+      db,
+      existing.id,
+      relatedModules,
+      relatedModuleRecords,
+    );
+
     return {
       action: "refreshed",
       module: moduleName,
@@ -209,13 +291,18 @@ export async function ingestKnowledgeInvestigation(
   }
 
   if (existing?.id) {
+    const existingStr = String(existing.id);
+    const existingColon = existingStr.indexOf(":");
+    const existingKey =
+      existingColon !== -1 ? existingStr.slice(existingColon + 1) : existingStr;
     await db.query(
       `
-        UPDATE $noteId SET
+        LET $existingRec = type::record('knowledge_note', $existingKey);
+        UPDATE $existingRec SET
           is_latest = false,
           updated_at = time::now()
       `,
-      { noteId: existing.id },
+      { existingKey },
     );
   }
 
@@ -260,37 +347,39 @@ export async function ingestKnowledgeInvestigation(
     },
   )) as SurrealResult;
 
-  const created = getFirstResult<{ id?: string }>(createResult);
+  const created = getFirstResult<{ id?: unknown }>(createResult);
   if (!created?.id) {
     throw new Error("failed to create knowledge note");
   }
 
+  // Both created.id and existing.id may be RecordId objects in SDK v2.
+  // Normalise to string and split to use type::record() via LET.
+  const createdStr = String(created.id);
+  const createdColon = createdStr.indexOf(":");
+  const createdKey =
+    createdColon !== -1 ? createdStr.slice(createdColon + 1) : createdStr;
+
   if (existing?.id) {
+    const existingStr = String(existing.id);
+    const existingColon = existingStr.indexOf(":");
+    const existingKey =
+      existingColon !== -1 ? existingStr.slice(existingColon + 1) : existingStr;
     await db.query(
       `
-        RELATE $newId -> supersedes -> $oldId
+        LET $newRec = type::record('knowledge_note', $createdKey);
+        LET $oldRec = type::record('knowledge_note', $existingKey);
+        RELATE $newRec -> supersedes -> $oldRec
       `,
-      { newId: created.id, oldId: existing.id },
+      { createdKey, existingKey },
     );
   }
 
-  for (const relatedModuleName of relatedModules) {
-    const relatedModule = await ensureModule(relatedModuleName);
-    await db.query(
-      `
-        LET $existing = (
-          SELECT * FROM mentions_module
-          WHERE in = $noteId
-            AND out = $relatedModuleId
-          LIMIT 1
-        )[0];
-        IF $existing = NONE {
-          RELATE $noteId -> mentions_module -> $relatedModuleId;
-        };
-      `,
-      { noteId: created.id, relatedModuleId: relatedModule.id },
-    );
-  }
+  await upsertMentionsModuleLinks(
+    db,
+    created.id,
+    relatedModules,
+    relatedModuleRecords,
+  );
 
   return {
     action: "created",
