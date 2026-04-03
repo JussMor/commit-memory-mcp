@@ -57,7 +57,7 @@ export async function runMigrations(): Promise<void> {
     DEFINE TABLE IF NOT EXISTS module SCHEMALESS PERMISSIONS NONE;
 
     DEFINE FIELD IF NOT EXISTS name ON module TYPE string;
-    DEFINE FIELD IF NOT EXISTS description ON module TYPE string;
+    DEFINE FIELD IF NOT EXISTS description ON module TYPE option<string> DEFAULT '';
     DEFINE FIELD IF NOT EXISTS status ON module TYPE string DEFAULT 'active';
     DEFINE FIELD IF NOT EXISTS updated_at ON module TYPE datetime DEFAULT time::now();
 
@@ -70,7 +70,7 @@ export async function runMigrations(): Promise<void> {
     DEFINE FIELD IF NOT EXISTS module ON business_fact TYPE record<module>;
     DEFINE FIELD IF NOT EXISTS summary ON business_fact TYPE string;
     DEFINE FIELD IF NOT EXISTS rationale ON business_fact TYPE string;
-    DEFINE FIELD IF NOT EXISTS source_pr ON business_fact TYPE record<pr>;
+    DEFINE FIELD OVERWRITE source_pr ON business_fact TYPE option<record<pr>>;
     DEFINE FIELD IF NOT EXISTS source_type ON business_fact TYPE string DEFAULT 'pr';
     DEFINE FIELD IF NOT EXISTS search_text ON business_fact TYPE string;
     DEFINE FIELD IF NOT EXISTS embedding ON business_fact TYPE array<number>;
@@ -162,14 +162,159 @@ export async function runMigrations(): Promise<void> {
       ON TABLE commit_chunk COLUMNS embedding HNSW DIMENSION 384 DIST COSINE TYPE F32;
   `);
 
+  // ---------------------------------------------------------------------------
+  // Temporal versioning on business_fact
+  // ---------------------------------------------------------------------------
   await db.query(`
-    DEFINE TABLE IF NOT EXISTS affects SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
-    DEFINE TABLE IF NOT EXISTS required_by SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
-    DEFINE TABLE IF NOT EXISTS belongs_to SCHEMALESS TYPE RELATION FROM pr TO module PERMISSIONS NONE;
-    DEFINE TABLE IF NOT EXISTS part_of SCHEMALESS TYPE RELATION FROM commit TO pr PERMISSIONS NONE;
-    DEFINE TABLE IF NOT EXISTS supersedes SCHEMALESS TYPE RELATION FROM knowledge_note TO knowledge_note PERMISSIONS NONE;
-    DEFINE TABLE IF NOT EXISTS mentions_module SCHEMALESS TYPE RELATION FROM knowledge_note TO module PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS t_start ON business_fact TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS t_end   ON business_fact TYPE option<datetime>;
   `);
 
-  console.log("[schema] migrations complete");
+  // ---------------------------------------------------------------------------
+  // repository table — top-level repo node for the lexical graph
+  // ---------------------------------------------------------------------------
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS repository SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS owner      ON repository TYPE string;
+    DEFINE FIELD IF NOT EXISTS name       ON repository TYPE string;
+    DEFINE FIELD IF NOT EXISTS full_name  ON repository TYPE string;
+    DEFINE FIELD IF NOT EXISTS synced_at  ON repository TYPE datetime DEFAULT time::now();
+
+    DEFINE INDEX IF NOT EXISTS repository_full_name ON repository FIELDS full_name UNIQUE;
+  `);
+
+  // ---------------------------------------------------------------------------
+  // file table — file-level node in the lexical graph
+  // ---------------------------------------------------------------------------
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS file SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS path       ON file TYPE string;
+    DEFINE FIELD IF NOT EXISTS repo       ON file TYPE string;
+    DEFINE FIELD IF NOT EXISTS module     ON file TYPE option<record<module>>;
+    DEFINE FIELD IF NOT EXISTS updated_at ON file TYPE datetime DEFAULT time::now();
+
+    DEFINE INDEX IF NOT EXISTS file_repo_path ON file FIELDS repo, path UNIQUE;
+  `);
+
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS bootstrap_run SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS repo ON bootstrap_run TYPE string;
+    DEFINE FIELD IF NOT EXISTS include_patterns ON bootstrap_run TYPE array<string>;
+    DEFINE FIELD IF NOT EXISTS include_hash ON bootstrap_run TYPE string;
+    DEFINE FIELD IF NOT EXISTS status ON bootstrap_run TYPE string DEFAULT 'pending';
+    DEFINE FIELD IF NOT EXISTS current_phase ON bootstrap_run TYPE int DEFAULT 1;
+    DEFINE FIELD IF NOT EXISTS last_file ON bootstrap_run TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS last_module ON bootstrap_run TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS files_total ON bootstrap_run TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS files_processed ON bootstrap_run TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS files_skipped ON bootstrap_run TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS facts_inserted ON bootstrap_run TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS modules_total ON bootstrap_run TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS modules_summarized ON bootstrap_run TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS summarized_modules ON bootstrap_run TYPE array<string> DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS started_at ON bootstrap_run TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON bootstrap_run TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS completed_at ON bootstrap_run TYPE option<datetime>;
+
+    DEFINE INDEX IF NOT EXISTS bootstrap_run_repo_hash ON bootstrap_run FIELDS repo, include_hash UNIQUE;
+  `);
+
+  // ---------------------------------------------------------------------------
+  // Research orchestration tables
+  // ---------------------------------------------------------------------------
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS research_session SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS question      ON research_session TYPE string;
+    DEFINE FIELD IF NOT EXISTS module        ON research_session TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS status        ON research_session TYPE string DEFAULT 'pending';
+    DEFINE FIELD IF NOT EXISTS steps         ON research_session TYPE array DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS findings      ON research_session TYPE array DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS final_answer  ON research_session TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS max_steps     ON research_session TYPE int DEFAULT 5;
+    DEFINE FIELD IF NOT EXISTS created_at    ON research_session TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at    ON research_session TYPE datetime DEFAULT time::now();
+
+    DEFINE TABLE IF NOT EXISTS research_session CHANGEFEED 30d;
+
+    DEFINE INDEX IF NOT EXISTS research_session_status ON research_session FIELDS status;
+    DEFINE INDEX IF NOT EXISTS research_session_module ON research_session FIELDS module;
+  `);
+
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS research_step SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS session      ON research_step TYPE record<research_session>;
+    DEFINE FIELD IF NOT EXISTS index        ON research_step TYPE int;
+    DEFINE FIELD IF NOT EXISTS instruction  ON research_step TYPE string;
+    DEFINE FIELD IF NOT EXISTS context      ON research_step TYPE string;
+    DEFINE FIELD IF NOT EXISTS status       ON research_step TYPE string DEFAULT 'pending';
+    DEFINE FIELD IF NOT EXISTS result       ON research_step TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS tokens_used  ON research_step TYPE option<int>;
+    DEFINE FIELD IF NOT EXISTS created_at   ON research_step TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS completed_at ON research_step TYPE option<datetime>;
+
+    DEFINE INDEX IF NOT EXISTS research_step_session_status ON research_step FIELDS session, status;
+    DEFINE INDEX IF NOT EXISTS research_step_session_index  ON research_step FIELDS session, index UNIQUE;
+  `);
+
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS research_finding SCHEMALESS PERMISSIONS NONE;
+
+    DEFINE FIELD IF NOT EXISTS session     ON research_finding TYPE record<research_session>;
+    DEFINE FIELD IF NOT EXISTS step        ON research_finding TYPE record<research_step>;
+    DEFINE FIELD IF NOT EXISTS module      ON research_finding TYPE string;
+    DEFINE FIELD IF NOT EXISTS text        ON research_finding TYPE string;
+    DEFINE FIELD IF NOT EXISTS confidence  ON research_finding TYPE float DEFAULT 0.6;
+    DEFINE FIELD IF NOT EXISTS promotes_to ON research_finding TYPE option<record<knowledge_note>>;
+    DEFINE FIELD IF NOT EXISTS created_at  ON research_finding TYPE datetime DEFAULT time::now();
+
+    DEFINE TABLE IF NOT EXISTS research_finding CHANGEFEED 30d;
+
+    DEFINE INDEX IF NOT EXISTS finding_session ON research_finding FIELDS session;
+    DEFINE INDEX IF NOT EXISTS finding_search  ON research_finding COLUMNS text
+      FULLTEXT ANALYZER commit_memory_text BM25;
+  `);
+
+  // ---------------------------------------------------------------------------
+  // Graph edges — module graph + lexical graph + knowledge graph
+  // ---------------------------------------------------------------------------
+  await db.query(`
+    DEFINE TABLE IF NOT EXISTS affects      SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS required_by  SCHEMALESS TYPE RELATION FROM module TO module PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS belongs_to   SCHEMALESS TYPE RELATION FROM pr TO module PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS part_of      SCHEMALESS TYPE RELATION FROM commit TO pr PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS supersedes   SCHEMALESS TYPE RELATION FROM knowledge_note TO knowledge_note PERMISSIONS NONE;
+    DEFINE TABLE IF NOT EXISTS mentions_module SCHEMALESS TYPE RELATION FROM knowledge_note TO module PERMISSIONS NONE;
+
+    -- Lexical graph edges
+    DEFINE TABLE IF NOT EXISTS modified   SCHEMALESS TYPE RELATION FROM commit TO file PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON modified TYPE float DEFAULT 1.0;
+
+    DEFINE TABLE IF NOT EXISTS contains   SCHEMALESS TYPE RELATION FROM module TO file PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON contains TYPE float DEFAULT 1.0;
+
+    -- Knowledge graph edges (business fact versioning)
+    DEFINE TABLE IF NOT EXISTS extends    SCHEMALESS TYPE RELATION FROM business_fact TO business_fact PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON extends TYPE float DEFAULT 0.9;
+
+    DEFINE TABLE IF NOT EXISTS replaces   SCHEMALESS TYPE RELATION FROM business_fact TO business_fact PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON replaces TYPE float DEFAULT 0.9;
+
+    -- PR -> file traceability
+    DEFINE TABLE IF NOT EXISTS touched    SCHEMALESS TYPE RELATION FROM pr TO file PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON touched TYPE float DEFAULT 1.0;
+
+    -- Day-0 reverse-engineering edges
+    DEFINE TABLE IF NOT EXISTS file_belongs_to SCHEMALESS TYPE RELATION FROM file TO module PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON file_belongs_to TYPE float DEFAULT 1.0;
+
+    DEFINE TABLE IF NOT EXISTS reverse_engineered_from SCHEMALESS TYPE RELATION FROM file TO business_fact PERMISSIONS NONE;
+    DEFINE FIELD IF NOT EXISTS confidence ON reverse_engineered_from TYPE float DEFAULT 0.5;
+  `);
+
+  process.stderr.write("[schema] migrations complete\n");
 }

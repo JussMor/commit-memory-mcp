@@ -464,3 +464,274 @@ function normalizeBodyLines(body: string): string[] {
     .map((line) => line.replace(/!\[[^\]]*\]\([^)]*\)/g, "").trim())
     .filter((line) => line.length > 0);
 }
+
+// ---------------------------------------------------------------------------
+// ATOM 5-Tuple Extraction
+// Extracts (subject, predicate, object, t_start, t_end) quintuples from a PR.
+// These are written as business_fact nodes with temporal validity tracking.
+//
+// When COMMIT_RAG_LLM_URL is set, extraction is delegated to an LLM.
+// Otherwise a lightweight rule-based extractor is used as a fallback.
+// ---------------------------------------------------------------------------
+
+type AtomTuple = {
+  subject: string;
+  predicate: string;
+  object: string;
+  t_start?: string;
+  t_end?: string;
+  confidence: number;
+};
+
+const PREDICATE_PATTERNS: Array<{
+  pattern: RegExp;
+  predicate: string;
+  confidence: number;
+}> = [
+  {
+    pattern: /(?:now\s+)?(?:requires?|needs?|depends? on)\s+(.+)/i,
+    predicate: "requires",
+    confidence: 0.75,
+  },
+  {
+    pattern: /(?:validates?|checks?|enforces?)\s+(.+)/i,
+    predicate: "validates",
+    confidence: 0.78,
+  },
+  {
+    pattern: /(?:replaces?|supersedes?|deprecates?)\s+(.+)/i,
+    predicate: "replaces",
+    confidence: 0.82,
+  },
+  {
+    pattern: /(?:restricts?|blocks?|prevents?)\s+(.+)/i,
+    predicate: "restricts",
+    confidence: 0.76,
+  },
+  {
+    pattern: /(?:notifies?|alerts?|triggers?)\s+(.+)/i,
+    predicate: "triggers",
+    confidence: 0.72,
+  },
+  {
+    pattern: /(?:must|should|has? to)\s+(.+)/i,
+    predicate: "must",
+    confidence: 0.7,
+  },
+  {
+    pattern: /(?:no longer|removed?|deleted?)\s+(.+)/i,
+    predicate: "removed",
+    confidence: 0.8,
+  },
+  {
+    pattern: /(?:adds?|introduces?|creates?)\s+(.+)/i,
+    predicate: "introduces",
+    confidence: 0.74,
+  },
+  {
+    pattern: /(?:limits?|caps?)\s+(.+)/i,
+    predicate: "limits",
+    confidence: 0.73,
+  },
+];
+
+function extractAtomTuplesFromText(
+  text: string,
+  subject: string,
+  sourceRef: string,
+  mergedAt?: string | null,
+): AtomTuple[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 10 && !l.startsWith("#"));
+
+  const tuples: AtomTuple[] = [];
+  const tStart = mergedAt ?? new Date().toISOString();
+
+  for (const line of lines) {
+    for (const { pattern, predicate, confidence } of PREDICATE_PATTERNS) {
+      const match = line.match(pattern);
+      if (match?.[1]) {
+        const object = match[1].slice(0, 200).trim();
+        if (object.split(/\s+/).length >= 2) {
+          tuples.push({
+            subject: subject.slice(0, 120),
+            predicate,
+            object,
+            t_start: tStart,
+            t_end: undefined,
+            confidence,
+          });
+        }
+      }
+    }
+  }
+
+  // Deduplicate by subject+predicate+object key
+  const seen = new Set<string>();
+  return tuples.filter((t) => {
+    const key = `${t.subject}|${t.predicate}|${t.object}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function extractAtomTuplesWithLlm(
+  url: string,
+  text: string,
+  subject: string,
+): Promise<AtomTuple[]> {
+  const prompt = `Extract business rules and facts from the following pull request description as a JSON array of objects.
+Each object must have: subject (string), predicate (string), object (string), confidence (0.0-1.0).
+Focus on WHY the change was made, not just what changed.
+Return ONLY the JSON array, no other text.
+
+Subject (module/feature): ${subject}
+
+PR Description:
+${text.slice(0, 3000)}`;
+
+  const apiKey =
+    process.env.COMMIT_RAG_LLM_API_KEY?.trim() ??
+    process.env.COPILOT_TOKEN?.trim() ??
+    process.env.GITHUB_TOKEN?.trim();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: process.env.COMMIT_RAG_LLM_MODEL ?? "llama3",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 800,
+        temperature: 0.1,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) return [];
+
+    type LlmResponse = {
+      choices?: Array<{ message?: { content?: string } }>;
+      response?: string;
+    };
+    const json = (await response.json()) as LlmResponse;
+    const raw = json.choices?.[0]?.message?.content ?? json.response ?? "";
+
+    // Extract JSON array from the response
+    const arrayMatch = raw.match(/\[[\s\S]*\]/);
+    if (!arrayMatch) return [];
+
+    const parsed = JSON.parse(arrayMatch[0]) as AtomTuple[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * atomExtract — main entry point for ATOM 5-tuple extraction.
+ * Extracts quintuples from a PR and writes them as business_fact nodes
+ * with temporal validity (t_start, t_end).
+ */
+export async function atomExtract(
+  repo: string,
+  prNumber: number,
+  moduleName: string,
+): Promise<number> {
+  const db = await getDb();
+  const pr = fetchPrFromGh(repo, prNumber);
+
+  const moduleKey = makeModuleRecordId(moduleName).replace(/^module:/, "");
+  const prKey = makePrRecordId(repo, prNumber).replace(/^pr:/, "");
+  const body = (pr.body ?? "").trim();
+  const subject = `${moduleName}/${pr.title}`;
+
+  // Ensure module exists
+  await db.query(
+    `UPSERT type::record('module', $moduleKey) SET name = $name, updated_at = time::now()`,
+    { moduleKey, name: moduleName },
+  );
+
+  let tuples: AtomTuple[];
+  const llmUrl = process.env.COMMIT_RAG_LLM_URL?.trim();
+
+  if (llmUrl && body) {
+    tuples = await extractAtomTuplesWithLlm(llmUrl, body, subject);
+    // Fall back to rule-based if LLM returned nothing
+    if (!tuples.length) {
+      tuples = extractAtomTuplesFromText(
+        body,
+        subject,
+        `${repo}#${prNumber}`,
+        pr.mergedAt,
+      );
+    }
+  } else {
+    tuples = extractAtomTuplesFromText(
+      body,
+      subject,
+      `${repo}#${prNumber}`,
+      pr.mergedAt,
+    );
+  }
+
+  let inserted = 0;
+  for (const tuple of tuples) {
+    const factText = `${tuple.subject} ${tuple.predicate} ${tuple.object}`;
+    const factKey = makeBusinessFactKey(repo, prNumber, moduleName, factText);
+    const searchText = `${factText} ${tuple.predicate} ${tuple.subject}`.trim();
+    const embedding = await makeEmbedding(searchText);
+
+    await db.query(
+      `
+        UPSERT type::record('business_fact', $factKey) CONTENT {
+          module:      type::record('module', $moduleKey),
+          summary:     $summary,
+          rationale:   $rationale,
+          search_text: $search_text,
+          embedding:   $embedding,
+          source_pr:   type::record('pr', $prKey),
+          source_type: 'atom',
+          confidence:  $confidence,
+          status:      'draft',
+          t_start:     type::datetime($t_start),
+          t_end:       NONE,
+          created_at:  time::now(),
+          updated_at:  time::now()
+        }
+      `,
+      {
+        factKey,
+        moduleKey,
+        prKey,
+        summary: factText.slice(0, 300),
+        rationale: `predicate: ${tuple.predicate} | object: ${tuple.object}`,
+        search_text: searchText,
+        embedding,
+        confidence: tuple.confidence,
+        t_start: tuple.t_start ?? new Date().toISOString(),
+      },
+    );
+    inserted++;
+  }
+
+  console.log(
+    `[atom] extracted ${inserted} tuples from PR #${prNumber} -> ${moduleName}`,
+  );
+  return inserted;
+}

@@ -1,73 +1,98 @@
 # @jussmor/commit-memory-mcp-surreal
 
-MCP server for PR traceability + business context, backed by SurrealDB.
+**Code Digital Twin via MCP.** Synchronizes developer context asynchronously by ingesting PRs, extracting business intent via the ATOM framework, and serving hybrid-ranked knowledge to AI agents through 8 focused tools.
 
-## Latest technology
+> Simple. Synchronized. Useful from minute one.
 
-- SurrealDB document + graph + vector-native schema
-- FULLTEXT indexes (BM25) for keyword retrieval
-- HNSW vector indexes for semantic retrieval
-- Hybrid ranker that combines semantic similarity, full-text score, keyword overlap, and confidence/importance
-- Open-source local embedding model support via `@xenova/transformers` (default: `Xenova/all-MiniLM-L6-v2`)
-- Optional Ollama embeddings fallback, plus deterministic hashed fallback
+## How it works
 
-## What it does
+```
+PR merges on GitHub
+       ↓
+ingest_prs  (one call)
+  ├─ sync raw PR metadata               (GitHub CLI → SurrealDB)
+  ├─ extract business facts             (memory chunks, PR body)
+  └─ ATOM 5-tuple extraction            (subject · predicate · object · t_start · t_end)
+       ↓
+SurrealDB knowledge graph
+  ├─ Lexical graph: repository → module → file → commit
+  ├─ Episodic graph: pr → business_fact ← module
+  └─ Semantic memory: knowledge_note (versioned, with lineage)
+       ↓
+AI agent calls get_module_context / pre_plan_sync_brief
+  └─ Hybrid-ranked response: BM25 + HNSW vector + confidence score
+```
 
-This server lets coding agents answer:
+## Technology
 
-- who changed this file
-- why this change happened
-- what merged recently on main
-- what business context to load before planning
+- **SurrealDB** — document + graph + vector-native schema in a single engine
+- **ATOM 5-tuples** — temporal business rules extracted from PR descriptions: `(subject, predicate, object, t_start, t_end)`
+- **Hybrid retrieval** — BM25 full-text + HNSW vector (384-dim) + confidence weighting
+- **Local embeddings** — `@xenova/transformers` (`Xenova/all-MiniLM-L6-v2`) with Ollama and deterministic hash fallbacks
+- **Optional LLM** — connect any OpenAI-compatible endpoint (`COMMIT_RAG_LLM_URL`) for richer ATOM extraction
 
 ## Architecture
 
-This package is organized as a layered MCP server:
+```
+src/
+  tools/index.ts          ← 8 MCP tools (single file, ~128 lines)
+  layers/
+    core.ts               ← Public surface: 8 functions backing the 8 tools
+    business.ts           ← Knowledge retrieval, lineage, search, planning briefs
+    ingest.ts             ← PR ingestion + ATOM 5-tuple extraction
+    trazability.ts        ← File/commit/PR traceability via GitHub CLI + git
+    coordination.ts       ← Decision logs, knowledge graph
+  orchestration/
+    orchestrator.ts       ← Multi-agent research: session creation, step planning
+    dispatch.ts           ← Step dispatcher with prior-findings injection
+    agent.ts              ← Stateless step executor (LLM-pluggable)
+    assemble.ts           ← Final answer assembly, auto-promotion to knowledge_note
+  db/
+    schema.ts             ← SurrealDB migrations (documents, relations, vector indexes)
+    client.ts             ← Connection management
+  search/
+    embeddings.ts         ← Local + Ollama + hash fallback
+    query.ts              ← Hybrid search (BM25 + HNSW)
+    rerank.ts             ← Optional Copilot/GPT reranking
+```
 
-- Entry/runtime: `src/index.ts` starts the server, runs schema migrations, registers tools, and connects via stdio transport.
-- Tool surface: `src/tools/index.ts` defines all MCP tools and maps each tool to a single orchestration function.
-- Domain layers: `src/layers/*` contains business logic grouped by concern:
-  - `ingest.ts`: PR ingestion and fact extraction
-  - `business.ts`: knowledge retrieval, lineage, search, and planning briefs
-  - `coordination.ts`: decision logs, stale knowledge checks, team/activity summaries, cross-module impact
-  - `trazability.ts`: repository/PR traceability lookups
-- Data layer: `src/db/*` manages SurrealDB connection and schema migrations (document, relation, and vector indexes).
-- External integrations:
-  - GitHub/PR sync in `src/pr/sync.ts`
-  - Git/worktree intelligence in `src/git/*`
-  - Embeddings and hybrid retrieval in `src/search/*`
+**Data model:**
 
-Request flow (high-level):
+| Table                                                           | Kind | Purpose                                         |
+| --------------------------------------------------------------- | ---- | ----------------------------------------------- |
+| `repository`, `module`, `file`                                  | Node | Lexical graph                                   |
+| `pr`, `commit`                                                  | Node | Episodic memory                                 |
+| `business_fact`                                                 | Node | Semantic memory — temporal (`t_start`, `t_end`) |
+| `memory_chunk`                                                  | Node | Unstructured PR context                         |
+| `knowledge_note`                                                | Node | Versioned, lineage-tracked knowledge            |
+| `research_session`, `research_step`, `research_finding`         | Node | Multi-agent orchestration state                 |
+| `modified`, `contains`, `touches`, `extends`, `replaces`        | Edge | Lexical + knowledge graph wiring                |
+| `belongs_to`, `part_of`, `affects`, `required_by`, `supersedes` | Edge | Module dependency graph                         |
 
-1. MCP client calls a tool over stdio.
-2. Tool handler in `src/tools/index.ts` validates input with Zod and dispatches to a layer function.
-3. Layer function reads/writes SurrealDB records and relation edges, optionally fetching GitHub or local git context.
-4. Search paths combine BM25 full-text and HNSW vector similarity, then re-rank for final response quality.
-5. Handler returns structured text payload to the MCP client.
+## The 8 Tools
 
-Data model (SurrealDB):
+### Dev workflow
 
-- Core records: `pr`, `commit`, `module`, `business_fact`, `memory_chunk`, `knowledge_note`, `commit_chunk`, `worktree`.
-- Relation tables: `affects`, `required_by`, `belongs_to`, `part_of`, `supersedes`, `mentions_module`.
-- Retrieval primitives:
-  - Full-text analyzer + BM25 indexes for lexical matching
-  - HNSW vector indexes (384-dim) for semantic matching
-  - Hybrid ranking across semantic score, keyword overlap, and confidence signals
+| Tool                    | When to use                                                                                                                                                 |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pre_plan_sync_brief`   | **First thing every morning.** Syncs PRs, checks overnight merges, returns a context brief for the module you're about to work on.                          |
+| `ingest_prs`            | After PRs merge, or on a schedule. Runs the full pipeline: sync → extract facts → ATOM tuples → update graph.                                               |
+| `promote_context_facts` | Sprint planning. Review auto-extracted draft facts, approve the ones that are accurate. Approved facts reach confidence 1.0 and become the source of truth. |
 
-## Tools
+### Agent-facing knowledge
 
-- `sync_pr_context`
-- `who_changed_this`
-- `why_was_this_changed`
-- `get_main_branch_overnight_brief`
-- `list_active_worktrees`
-- `ingest_pr`
-- `extract_business_facts`
-- `get_module_overview`
-- `get_module_graph`
-- `promote_context_facts`
-- `search_module_context`
-- `pre_plan_sync_brief`
+| Tool                 | When to use                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `get_module_context` | Primary search. Returns hybrid-ranked overview + latest knowledge + decisions. Pass `query` for semantic filtering. |
+| `get_module_graph`   | Understand blast radius before changing a module. Shows what it depends on and what it affects.                     |
+| `get_chunk_history`  | Trace how understanding of a module evolved. Useful when a rule feels outdated.                                     |
+
+### Traceability
+
+| Tool                   | When to use                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `who_changed_this`     | Find the owner of a file before touching it. Returns recent authors, commits, and PR context.  |
+| `why_was_this_changed` | Understand the business intent behind a change. Traverses file → commit → PR → business facts. |
 
 ## Install
 
@@ -76,7 +101,7 @@ npm i -g @jussmor/commit-memory-mcp-surreal
 commit-memory-mcp-surreal
 ```
 
-Or run without global install:
+Or without a global install:
 
 ```bash
 npx -y @jussmor/commit-memory-mcp-surreal
@@ -84,21 +109,56 @@ npx -y @jussmor/commit-memory-mcp-surreal
 
 ## Environment variables
 
-- `SURREAL_URL` (default: `ws://127.0.0.1:8000/rpc`)
-- `SURREAL_USER` (default: `root`)
-- `SURREAL_PASS` (default: `root`)
-- `SURREAL_NS` (default: `main`)
-- `SURREAL_DB` (default: `main`)
-- `GH_BIN` optional absolute path to GitHub CLI (for example `/opt/homebrew/bin/gh`)
-- `COMMIT_RAG_EMBED_MODEL` optional local open-source embedding model id (default: `Xenova/all-MiniLM-L6-v2`)
-- `COMMIT_RAG_DISABLE_LOCAL_EMBEDDINGS` set `1` to skip local transformers embeddings
-- `OLLAMA_EMBED_MODEL` optional Ollama embedding model (used when local embeddings are disabled/unavailable)
-- `OLLAMA_BASE_URL` optional Ollama base URL (default: `http://127.0.0.1:11434`)
-- `COMMIT_RAG_DIMENSION` optional embedding dimension (default: `384`)
+### Required
 
-## VS Code MCP config examples
+| Variable       | Default                   | Description                  |
+| -------------- | ------------------------- | ---------------------------- |
+| `SURREAL_URL`  | `ws://127.0.0.1:8000/rpc` | SurrealDB WebSocket endpoint |
+| `SURREAL_USER` | `root`                    | SurrealDB username           |
+| `SURREAL_PASS` | `root`                    | SurrealDB password           |
+| `SURREAL_NS`   | `main`                    | SurrealDB namespace          |
+| `SURREAL_DB`   | `main`                    | SurrealDB database           |
 
-### 1) This package (cloud endpoint)
+### Optional
+
+| Variable                              | Description                                                                                              |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `COMMIT_RAG_LLM_URL`                  | OpenAI-compatible endpoint for ATOM extraction and research agent steps (e.g. Ollama, LM Studio, OpenAI) |
+| `COMMIT_RAG_LLM_API_KEY`              | Bearer token for authenticated LLM endpoints. Falls back to `COPILOT_TOKEN` or `GITHUB_TOKEN` if unset.  |
+| `COMMIT_RAG_LLM_MODEL`                | Model name passed to the LLM endpoint (default: `llama3`)                                                |
+| `COMMIT_RAG_EMBED_MODEL`              | Local embedding model (default: `Xenova/all-MiniLM-L6-v2`)                                               |
+| `COMMIT_RAG_DISABLE_LOCAL_EMBEDDINGS` | Set `1` to skip local transformers and fall back to Ollama or hash                                       |
+| `COMMIT_RAG_DIMENSION`                | Embedding dimension (default: `384`)                                                                     |
+| `OLLAMA_EMBED_MODEL`                  | Ollama embedding model (used when local embeddings are disabled)                                         |
+| `OLLAMA_BASE_URL`                     | Ollama base URL (default: `http://127.0.0.1:11434`)                                                      |
+| `GH_BIN`                              | Absolute path to the GitHub CLI binary (e.g. `/opt/homebrew/bin/gh`)                                     |
+| `COPILOT_TOKEN`                       | GitHub PAT for optional Copilot-powered reranking of commit search results                               |
+| `COPILOT_MODEL`                       | Model for Copilot reranking (default: `gpt-4o-mini`)                                                     |
+
+## VS Code MCP config
+
+### Local SurrealDB
+
+```json
+{
+  "servers": {
+    "commit-memory-surreal": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@jussmor/commit-memory-mcp-surreal"],
+      "env": {
+        "SURREAL_URL": "ws://127.0.0.1:8000/rpc",
+        "SURREAL_USER": "root",
+        "SURREAL_PASS": "root",
+        "SURREAL_NS": "main",
+        "SURREAL_DB": "main"
+      }
+    }
+  }
+}
+```
+
+### SurrealDB Cloud + LLM extraction
 
 ```json
 {
@@ -110,100 +170,80 @@ npx -y @jussmor/commit-memory-mcp-surreal
       "env": {
         "SURREAL_URL": "wss://your-instance.aws-usw2.surreal.cloud/rpc",
         "SURREAL_USER": "root",
-        "SURREAL_PASS": "root",
+        "SURREAL_PASS": "your-password",
         "SURREAL_NS": "main",
-        "SURREAL_DB": "main"
+        "SURREAL_DB": "main",
+        "COMMIT_RAG_LLM_URL": "http://localhost:11434/v1/chat/completions",
+        "COMMIT_RAG_LLM_MODEL": "llama3"
       }
     }
   }
 }
 ```
 
-### 2) Official SurrealMCP in parallel
+## Daily workflow
 
-```json
-{
-  "servers": {
-    "SurrealDB": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "-i",
-        "--pull",
-        "always",
-        "surrealdb/surrealmcp:latest",
-        "start"
-      ]
-    }
-  }
-}
+### Day-0 bootstrap (legacy or undocumented repos)
+
+Run this one-time admin command to reverse-engineer draft business facts directly from source files and seed SurrealDB before any PR history exists.
+
+```bash
+commit-memory bootstrap --repo ./my-legacy-app --include "src/**/*.ts"
 ```
 
-Note: Official SurrealMCP requires an explicit `connect_endpoint` call before query tools are usable.
+Resume an interrupted bootstrap without reprocessing files that already have reverse-engineered facts:
 
-## Usage examples
-
-### Sync merged PRs
-
-```text
-sync_pr_context({
-  repo: "JussMor/commit-memory-mcp",
-  limit: 20
-})
+```bash
+commit-memory bootstrap --repo ./my-legacy-app --include "src/**/*.ts" --resume
 ```
 
-### Find who changed a file
+Start directly at phase 2 and rebuild module descriptions from reverse-engineered facts already stored in SurrealDB:
 
-```text
-who_changed_this({
-  file: "packages/commit-rag-mcp/src/db/client.ts",
-  repo: "JussMor/commit-memory-mcp"
-})
+```bash
+commit-memory bootstrap --repo ./my-legacy-app --include "src/**/*.ts" --start-phase 2
 ```
 
-### Explain why a file changed
+What it does:
+
+- Lexical mapping: creates `module` + `file` nodes and links `module -> contains -> file`.
+- File-level intent extraction: asks the LLM for ATOM-style facts from each source file.
+- Graph provenance: stores facts as `source_type: reverse_engineered` with `confidence: 0.5` and links `file -> reverse_engineered_from -> business_fact`.
+- Module summarization: synthesizes module-level overviews and stores them in `module.description`.
+- Resume checkpointing: persists the last active file/module plus aggregate progress in `bootstrap_run` so interrupted runs can continue cleanly.
+
+### Morning startup
 
 ```text
-why_was_this_changed({
-  file: "packages/commit-rag-mcp/src/layers/business.ts",
-  repo: "JussMor/commit-memory-mcp"
-})
+pre_plan_sync_brief({ repo: "owner/repo", module: "billing" })
 ```
 
-### Ingest one PR and extract business facts
+Returns: overnight merges, latest facts, knowledge brief — everything needed before writing code.
+
+### Ingest new PRs (or automate with a webhook)
 
 ```text
-ingest_pr({ repo: "JussMor/commit-memory-mcp", pr_number: 123 })
-extract_business_facts({ repo: "JussMor/commit-memory-mcp", pr_number: 123, module: "billing" })
+ingest_prs({ repo: "owner/repo", limit: 20 })
 ```
 
-### Promote reviewed facts
+Runs: sync → `ingest_pr` → `extractBusinessFacts` → `atomExtract` for each merged PR.
+
+### Ask for context before coding
 
 ```text
-promote_context_facts({ module: "billing", pr_number: 123 })
+get_module_context({ module: "billing", query: "invoice retry timeout" })
 ```
 
-### Search module context before coding
+### Understand a file's history
 
 ```text
-search_module_context({ module: "billing", query: "invoice retry timeout", limit: 10 })
+who_changed_this({ file: "src/billing/invoice.ts", repo: "owner/repo" })
+why_was_this_changed({ file: "src/billing/invoice.ts", repo: "owner/repo" })
 ```
 
-### Retrieve complete module overview
+### Sprint planning — validate auto-extracted facts
 
 ```text
-get_module_overview({ module: "billing" })
-```
-
-### Pre-plan brief (recommended before implementation)
-
-```text
-pre_plan_sync_brief({
-  repo: "JussMor/commit-memory-mcp",
-  module: "billing"
-})
+promote_context_facts({ module: "billing" })
 ```
 
 ## Local development
