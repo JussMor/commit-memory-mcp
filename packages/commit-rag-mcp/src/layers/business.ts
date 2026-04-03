@@ -1066,8 +1066,6 @@ export async function prePlanSyncBrief(
   repo: string,
   moduleName: string,
 ): Promise<string> {
-  const db = await getDb();
-
   // Delegate to orchestration layer to create research session and decompose question
   const question = `Generate pre-planning brief for ${moduleName} module. Include recent changes, architectural context, and action items.`;
 
@@ -1081,35 +1079,15 @@ export async function prePlanSyncBrief(
   try {
     const sessionId = await startResearch(researchRequest);
 
-    // Poll session for completion (with timeout)
-    let attempts = 0;
-    const maxAttempts = 30; // 30 seconds timeout
-
-    while (attempts < maxAttempts) {
-      const sessionResult = (await db.query(
-        `SELECT status, final_answer FROM type::record($id)`,
-        { id: sessionId },
-      )) as unknown[][];
-
-      const session = getLastDefinedResult<{
-        status?: string;
-        final_answer?: string;
-      }>(sessionResult);
-
-      if (session?.status === "completed" && session.final_answer) {
-        return session.final_answer;
-      }
-
-      if (session?.status === "error") {
-        return `Research session failed: see session ${sessionId} for details`;
-      }
-
-      // Wait before next poll
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      attempts++;
-    }
-
-    return `Research session ${sessionId} still in progress or timed out`;
+    return [
+      `Research session started: ${sessionId}`,
+      `Module: ${moduleName} | Steps: ${researchRequest.maxSteps}`,
+      ``,
+      `The session is now running asynchronously. Use these tools to follow progress:`,
+      `  - get_research_status  → see step-by-step progress`,
+      `  - execute_research_step → advance the next pending step`,
+      `  - get_research_result  → retrieve the final answer once complete`,
+    ].join("\n");
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return `Error in pre-plan sync: ${errorMsg}`;

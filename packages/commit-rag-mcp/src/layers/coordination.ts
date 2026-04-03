@@ -608,3 +608,163 @@ export async function flagDecision(
     reason,
   });
 }
+
+// ---------------------------------------------------------------------------
+// compact_stale_knowledge
+// Smart forgetting: archive stale facts, merge overlapping ones, delete
+// superseded knowledge_note versions. Keeps the knowledge graph clean.
+// Pass dryRun=true to preview what would be cleaned up.
+// ---------------------------------------------------------------------------
+
+type CompactionResult = {
+  module: string;
+  dry_run: boolean;
+  archived_facts: number;
+  merged_groups: number;
+  deleted_old_versions: number;
+  details: {
+    archived_fact_ids: string[];
+    merged_into_ids: string[];
+    deleted_note_ids: string[];
+  };
+};
+
+export async function compactStaleKnowledge(
+  module: string,
+  staleDays = 30,
+  dryRun = true,
+): Promise<string> {
+  const db = await getDb();
+  const days = Math.max(1, Math.min(staleDays, 365));
+  const moduleKey = sanitizeModuleName(module);
+
+  // 1. Find stale business_fact records (promoted but not updated recently)
+  const factResult = (await db.query(
+    `
+      LET $mod = (SELECT id FROM module WHERE name = $name LIMIT 1)[0];
+      LET $cutoff = time::now() - duration::from_days($days);
+
+      SELECT id, summary, rationale, confidence, updated_at
+      FROM business_fact
+      WHERE module = $mod.id
+        AND status = 'promoted'
+        AND updated_at < $cutoff
+      ORDER BY summary ASC
+    `,
+    { name: moduleKey, days },
+  )) as unknown[][];
+
+  type FactRow = {
+    id: string;
+    summary: string;
+    rationale?: string;
+    confidence: number;
+    updated_at: string;
+  };
+  const staleFacts = (factResult.at(-1) ?? []) as FactRow[];
+
+  // 2. Group stale facts by first 60 chars of summary (overlap detection)
+  const groups = new Map<string, FactRow[]>();
+  for (const fact of staleFacts) {
+    const key = (fact.summary ?? "").slice(0, 60).toLowerCase().trim();
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(fact);
+    groups.set(key, group);
+  }
+
+  const archivedFactIds: string[] = [];
+  const mergedIntoIds: string[] = [];
+
+  // 3. For groups with 2+ overlapping facts, merge into one
+  for (const [, group] of groups) {
+    if (group.length < 2) {
+      // Single stale fact — just archive it
+      archivedFactIds.push(String(group[0].id));
+      continue;
+    }
+
+    // Pick the highest-confidence fact as the survivor
+    group.sort((a, b) => b.confidence - a.confidence);
+    const survivor = group[0];
+    const others = group.slice(1);
+
+    // Average confidence across the group
+    const avgConfidence =
+      group.reduce((sum, f) => sum + f.confidence, 0) / group.length;
+
+    // Merge rationales
+    const mergedRationale = group
+      .map((f) => f.rationale)
+      .filter(Boolean)
+      .join(" | ");
+
+    if (!dryRun) {
+      // Update survivor with merged data
+      await db.query(
+        `UPDATE type::record($id) SET
+          rationale = $rationale,
+          confidence = $confidence,
+          updated_at = time::now()`,
+        {
+          id: String(survivor.id),
+          rationale: mergedRationale.slice(0, 1000),
+          confidence: Math.round(avgConfidence * 100) / 100,
+        },
+      );
+
+      // Archive the others and set t_end
+      for (const other of others) {
+        await db.query(
+          `UPDATE type::record($id) SET
+            status = 'archived',
+            t_end = time::now(),
+            updated_at = time::now()`,
+          { id: String(other.id) },
+        );
+      }
+    }
+
+    mergedIntoIds.push(String(survivor.id));
+    for (const other of others) {
+      archivedFactIds.push(String(other.id));
+    }
+  }
+
+  // 4. Find old knowledge_note versions (is_latest = false) for this module
+  const noteResult = (await db.query(
+    `
+      LET $mod = (SELECT id FROM module WHERE name = $name LIMIT 1)[0];
+
+      SELECT id FROM knowledge_note
+      WHERE module = $mod.id
+        AND is_latest = false
+    `,
+    { name: moduleKey },
+  )) as unknown[][];
+
+  type NoteRow = { id: string };
+  const oldNotes = (noteResult.at(-1) ?? []) as NoteRow[];
+  const deletedNoteIds = oldNotes.map((n) => String(n.id));
+
+  if (!dryRun && deletedNoteIds.length > 0) {
+    for (const noteId of deletedNoteIds) {
+      await db.query(`DELETE type::record($id)`, { id: noteId });
+    }
+  }
+
+  const result: CompactionResult = {
+    module: moduleKey,
+    dry_run: dryRun,
+    archived_facts: archivedFactIds.length,
+    merged_groups: mergedIntoIds.length,
+    deleted_old_versions: deletedNoteIds.length,
+    details: {
+      archived_fact_ids: archivedFactIds,
+      merged_into_ids: mergedIntoIds,
+      deleted_note_ids: deletedNoteIds,
+    },
+  };
+
+  return JSON.stringify(result, null, 2);
+}

@@ -8,6 +8,14 @@
  *  - Zero manual wiring: ingestion is fully automated end-to-end.
  */
 
+import { executeStep } from "../orchestration/agent.js";
+import {
+  getResearchResult as getResearchResultRaw,
+  getResearchStatus as getResearchStatusRaw,
+  promoteAllFindings,
+} from "../orchestration/assemble.js";
+import { getRunningStep } from "../orchestration/dispatch.js";
+import { startResearch } from "../orchestration/orchestrator.js";
 import {
   getKnowledgeLineage,
   getLatestKnowledge,
@@ -17,7 +25,10 @@ import {
   promoteContextFacts as promoteContextFactsRaw,
   searchModuleContext,
 } from "./business.js";
-import { getDecisionLog } from "./coordination.js";
+import {
+  compactStaleKnowledge as compactStaleKnowledgeRaw,
+  getDecisionLog,
+} from "./coordination.js";
 import { runGh } from "./gh.js";
 import { atomExtract, extractBusinessFacts, ingestPr } from "./ingest.js";
 import {
@@ -339,4 +350,83 @@ export async function whyWasThisChanged(
   repo?: string,
 ): Promise<string> {
   return whyWasThisChangedRaw(file, sha, repo ?? "");
+}
+
+// ---------------------------------------------------------------------------
+// 9. compact_stale_knowledge
+// Smart forgetting: archive stale facts, merge overlapping ones, delete
+// superseded knowledge_note versions. dryRun=true previews without acting.
+// ---------------------------------------------------------------------------
+export async function compactStaleKnowledge(
+  module: string,
+  staleDays?: number,
+  dryRun?: boolean,
+): Promise<string> {
+  return compactStaleKnowledgeRaw(module, staleDays, dryRun);
+}
+
+// ---------------------------------------------------------------------------
+// 10. start_research
+// Creates a research session with decomposed steps and dispatches step 0.
+// Returns the session ID immediately (non-blocking).
+// ---------------------------------------------------------------------------
+export async function startResearchSession(
+  question: string,
+  repo: string,
+  module?: string,
+  maxSteps?: number,
+): Promise<string> {
+  const sessionId = await startResearch({
+    question,
+    module,
+    repo,
+    maxSteps,
+  });
+  return `Research session started: ${sessionId}\nUse get_research_status to follow progress.`;
+}
+
+// ---------------------------------------------------------------------------
+// 11. get_research_status
+// Snapshot of a research session: steps, findings, current status.
+// ---------------------------------------------------------------------------
+export async function getResearchSessionStatus(
+  sessionId: string,
+): Promise<string> {
+  return getResearchStatusRaw(sessionId);
+}
+
+// ---------------------------------------------------------------------------
+// 12. execute_research_step
+// Finds the current running step in a session and executes it.
+// The research agent calls this to advance the session one step.
+// ---------------------------------------------------------------------------
+export async function executeResearchStep(sessionId: string): Promise<string> {
+  const step = await getRunningStep(sessionId);
+  if (!step) {
+    return "No running step found for this session. It may be complete or waiting for dispatch.";
+  }
+  await executeStep(String(step.id));
+  return `Step ${step.index} executed for session ${sessionId}`;
+}
+
+// ---------------------------------------------------------------------------
+// 13. get_research_result
+// Returns the final assembled answer once a session is complete.
+// ---------------------------------------------------------------------------
+export async function getResearchSessionResult(
+  sessionId: string,
+): Promise<string> {
+  return getResearchResultRaw(sessionId);
+}
+
+// ---------------------------------------------------------------------------
+// 14. promote_research_findings
+// Promotes all unpromoted findings in a session to permanent knowledge_note
+// records. Called after dev validation.
+// ---------------------------------------------------------------------------
+export async function promoteResearchFindings(
+  sessionId: string,
+): Promise<string> {
+  const promoted = await promoteAllFindings(sessionId);
+  return `${promoted} findings promoted to permanent knowledge.`;
 }

@@ -1,12 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+  compactStaleKnowledge,
+  executeResearchStep,
   getChunkHistory,
   getModuleContext,
   getModuleGraph,
+  getResearchSessionResult,
+  getResearchSessionStatus,
   ingestPrs,
   prePlanSyncBrief,
   promoteContextFacts,
+  promoteResearchFindings,
+  startResearchSession,
   whoChangedThis,
   whyWasThisChanged,
 } from "../layers/core.js";
@@ -127,6 +133,108 @@ export function registerTools(server: McpServer): void {
     async ({ file, sha, repo }) => ({
       content: [
         { type: "text", text: await whyWasThisChanged(file, sha, repo) },
+      ],
+    }),
+  );
+
+  // =========================================================================
+  // 6. SMART FORGETTING  ·  Knowledge graph compaction.
+  //    Archives stale facts, merges overlapping ones, deletes old versions.
+  // =========================================================================
+
+  server.tool(
+    "compact_stale_knowledge",
+    "Smart forgetting: archives stale business facts, merges overlapping ones into summary nodes, and deletes superseded knowledge_note versions. Pass dry_run=true (default) to preview what would be cleaned up before committing.",
+    {
+      module: z.string(),
+      stale_days: z
+        .number()
+        .optional()
+        .describe(
+          "Days of inactivity before a fact is considered stale (default 30)",
+        ),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe(
+          "Preview mode — show what would be cleaned up without acting (default true)",
+        ),
+    },
+    async ({ module, stale_days, dry_run }) => ({
+      content: [
+        {
+          type: "text",
+          text: await compactStaleKnowledge(module, stale_days, dry_run),
+        },
+      ],
+    }),
+  );
+
+  // =========================================================================
+  // 7. RESEARCH ORCHESTRATION  ·  Multi-step async research sessions.
+  //    External agents drive research via SurrealDB-backed state machine.
+  // =========================================================================
+
+  server.tool(
+    "start_research",
+    "Creates a new research session: decomposes a question into investigation steps, pre-fetches module context, and dispatches step 0. Returns a session ID immediately (non-blocking). Use get_research_status to follow progress.",
+    {
+      question: z.string(),
+      repo: z.string(),
+      module: z.string().optional().describe("Module to scope the research to"),
+      max_steps: z
+        .number()
+        .optional()
+        .describe("Maximum investigation steps (default 5, max 10)"),
+    },
+    async ({ question, repo, module, max_steps }) => ({
+      content: [
+        {
+          type: "text",
+          text: await startResearchSession(question, repo, module, max_steps),
+        },
+      ],
+    }),
+  );
+
+  server.tool(
+    "get_research_status",
+    "Returns a snapshot of a research session: current status, step progress, and findings so far. Use to monitor async research sessions.",
+    { session_id: z.string() },
+    async ({ session_id }) => ({
+      content: [
+        { type: "text", text: await getResearchSessionStatus(session_id) },
+      ],
+    }),
+  );
+
+  server.tool(
+    "execute_research_step",
+    "Executes the current running step in a research session. The research agent calls this to advance the session one step at a time. Each step reads its instruction and context from SurrealDB, processes it, writes findings back, and dispatches the next step.",
+    { session_id: z.string() },
+    async ({ session_id }) => ({
+      content: [{ type: "text", text: await executeResearchStep(session_id) }],
+    }),
+  );
+
+  server.tool(
+    "get_research_result",
+    "Returns the final assembled answer from a completed research session. If the session is still running, returns the current status instead.",
+    { session_id: z.string() },
+    async ({ session_id }) => ({
+      content: [
+        { type: "text", text: await getResearchSessionResult(session_id) },
+      ],
+    }),
+  );
+
+  server.tool(
+    "promote_research_findings",
+    "Promotes all unpromoted findings from a research session to permanent knowledge_note records. Call after reviewing findings to persist them as the official knowledge base.",
+    { session_id: z.string() },
+    async ({ session_id }) => ({
+      content: [
+        { type: "text", text: await promoteResearchFindings(session_id) },
       ],
     }),
   );
