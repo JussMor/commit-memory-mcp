@@ -13,11 +13,9 @@
   },
   "include": [
     "src/index.ts",
-    "src/indexer.ts",
     "src/types.ts",
     "src/cli/**/*.ts",
     "src/db/**/*.ts",
-    "src/git/**/*.ts",
     "src/layers/**/*.ts",
     "src/search/embeddings.ts",
     "src/tools/**/*.ts"

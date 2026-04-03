@@ -1,4 +1,6 @@
 import { getDb } from "../db/client.js";
+import type { ResearchRequest } from "../orchestration/orchestrator.js";
+import { startResearch } from "../orchestration/orchestrator.js";
 import { embedText, getExpectedDimension } from "../search/embeddings.js";
 import { ingestKnowledgeInvestigation } from "./knowledge.js";
 
@@ -220,6 +222,8 @@ function dedupeMemoryChunks(chunks: MemoryChunk[]): MemoryChunk[] {
   );
 }
 
+const QUERYABLE_FACT_STATUSES = ["promoted", "draft"] as const;
+
 function rankFacts(
   facts: ModuleFact[],
   limit: number,
@@ -332,7 +336,7 @@ export async function getModuleKnowledge(moduleName: string): Promise<string> {
             source_pr.number AS pr_number
           FROM business_fact
           WHERE module = $mod.id
-            AND status = 'promoted'
+            AND status INSIDE $fact_statuses
           ORDER BY created_at DESC
         ),
         recent_prs: (
@@ -364,7 +368,7 @@ export async function getModuleKnowledge(moduleName: string): Promise<string> {
         )
       }
     `,
-    { name: moduleName },
+    { name: moduleName, fact_statuses: QUERYABLE_FACT_STATUSES },
   )) as SurrealResult;
 
   const knowledge = (getLastDefinedResult(result) ?? {}) as ModuleKnowledge;
@@ -652,31 +656,37 @@ export async function promoteContextFacts(
     `
       LET $mod = (SELECT * FROM module WHERE name = $name LIMIT 1)[0];
       LET $facts = (
-        SELECT id, source_pr.number AS pr_number
+        SELECT id, summary, source_pr.number AS pr_number, source_type, confidence
         FROM business_fact
         WHERE module = $mod.id
           AND status = 'draft'
       );
       FOR $f IN $facts {
         IF $pr_number = NONE OR $f.pr_number = $pr_number {
-          UPDATE $f.id SET status = 'promoted';
+          UPDATE $f.id SET
+            status = 'promoted',
+            confidence = math::max($f.confidence ?? 0, 1),
+            updated_at = time::now();
         };
       };
-      RETURN (SELECT count() AS promoted FROM business_fact WHERE module = $mod.id AND status = 'promoted');
+
+      RETURN {
+        promoted_count: count((SELECT VALUE id FROM business_fact WHERE module = $mod.id AND status = 'promoted')),
+        remaining_draft_count: count((SELECT VALUE id FROM business_fact WHERE module = $mod.id AND status = 'draft')),
+        recently_promoted: (
+          SELECT summary, source_type, confidence, updated_at
+          FROM business_fact
+          WHERE module = $mod.id
+            AND status = 'promoted'
+          ORDER BY updated_at DESC
+          LIMIT 10
+        )
+      };
     `,
     { name: moduleName, pr_number: prNumber ?? null },
   )) as SurrealResult;
 
-  const promotedRows =
-    getLastDefinedResult<Array<{ promoted?: number }>>(result);
-  const promoted = Array.isArray(promotedRows)
-    ? promotedRows.reduce(
-        (maxPromoted, row) => Math.max(maxPromoted, row.promoted ?? 0),
-        0,
-      )
-    : 0;
-
-  return JSON.stringify({ promoted }, null, 2);
+  return JSON.stringify(getLastDefinedResult(result) ?? {}, null, 2);
 }
 
 export async function buildContextPack(
@@ -701,7 +711,7 @@ export async function buildContextPack(
               SELECT id, search::score(1) AS fts_score
               FROM business_fact
               WHERE module = $mod.id
-                AND status = 'promoted'
+                AND status INSIDE $fact_statuses
                 AND search_text @1@ $query
               ORDER BY fts_score DESC
               LIMIT $candidate_limit
@@ -711,6 +721,7 @@ export async function buildContextPack(
             name: moduleName,
             query: normalizedQuery,
             candidate_limit: candidateLimit,
+            fact_statuses: QUERYABLE_FACT_STATUSES,
           },
         ),
         db.query(
@@ -770,7 +781,7 @@ export async function buildContextPack(
             source_pr.title AS pr_title,
             source_pr.number AS pr_number
           FROM business_fact
-          WHERE module = $mod.id AND status = 'promoted'
+          WHERE module = $mod.id AND status INSIDE $fact_statuses
           ORDER BY created_at DESC
           LIMIT $candidate_limit
         ),
@@ -798,7 +809,11 @@ export async function buildContextPack(
         )
       }
     `,
-    { name: moduleName, candidate_limit: candidateLimit },
+    {
+      name: moduleName,
+      candidate_limit: candidateLimit,
+      fact_statuses: QUERYABLE_FACT_STATUSES,
+    },
   )) as SurrealResult;
 
   const contextPack = (getLastDefinedResult(result) ?? {}) as ContextPack;
@@ -872,13 +887,18 @@ export async function agentRetrieveContext(
             SELECT id, search::score(1) AS fts_score
             FROM business_fact
             WHERE module = $mod.id
-              AND status = 'promoted'
+              AND status INSIDE $fact_statuses
               AND search_text @1@ $query
             ORDER BY fts_score DESC
             LIMIT $candidate_limit
           )
         `,
-        { name: moduleName, query, candidate_limit: candidateLimit },
+        {
+          name: moduleName,
+          query,
+          candidate_limit: candidateLimit,
+          fact_statuses: QUERYABLE_FACT_STATUSES,
+        },
       ),
       db.query(
         `
@@ -933,7 +953,7 @@ export async function agentRetrieveContext(
             source_pr.number AS pr_number
           FROM business_fact
           WHERE module = $mod.id
-            AND status = 'promoted'
+            AND status INSIDE $fact_statuses
           ORDER BY created_at DESC
           LIMIT $candidate_limit
         ),
@@ -949,7 +969,11 @@ export async function agentRetrieveContext(
         )
       }
     `,
-    { name: moduleName, candidate_limit: candidateLimit },
+    {
+      name: moduleName,
+      candidate_limit: candidateLimit,
+      fact_statuses: QUERYABLE_FACT_STATUSES,
+    },
   )) as SurrealResult;
 
   const context =
@@ -1044,44 +1068,50 @@ export async function prePlanSyncBrief(
 ): Promise<string> {
   const db = await getDb();
 
-  const [businessResult, overnightResult] = (await Promise.all([
-    db.query(
-      `
-        LET $mod = (SELECT * FROM module WHERE name = $name LIMIT 1)[0];
-        RETURN {
-          facts: (
-            SELECT summary, rationale, created_at FROM business_fact
-            WHERE module = $mod.id AND status = 'promoted'
-            ORDER BY created_at DESC LIMIT 5
-          ),
-          graph: {
-            affects: (SELECT ->affects->module.name AS n FROM $mod.id)[0].n,
-            required_by: (SELECT ->required_by->module.name AS n FROM $mod.id)[0].n
-          }
-        }
-      `,
-      { name: moduleName },
-    ),
-    db.query(
-      `
-        SELECT number, title, author, merged_at
-        FROM pr
-        WHERE repo = $repo
-          AND merged_at > time::now() - duration::from_hours(24)
-          AND state = 'merged'
-        ORDER BY merged_at DESC
-      `,
-      { repo },
-    ),
-  ])) as [SurrealResult, SurrealResult];
+  // Delegate to orchestration layer to create research session and decompose question
+  const question = `Generate pre-planning brief for ${moduleName} module. Include recent changes, architectural context, and action items.`;
 
-  return JSON.stringify(
-    {
-      module: moduleName,
-      business_context: getLastDefinedResult(businessResult) ?? {},
-      overnight_prs: overnightResult[0] ?? [],
-    },
-    null,
-    2,
-  );
+  const researchRequest: ResearchRequest = {
+    question,
+    module: moduleName,
+    repo,
+    maxSteps: 3,
+  };
+
+  try {
+    const sessionId = await startResearch(researchRequest);
+
+    // Poll session for completion (with timeout)
+    let attempts = 0;
+    const maxAttempts = 30; // 30 seconds timeout
+
+    while (attempts < maxAttempts) {
+      const sessionResult = (await db.query(
+        `SELECT status, final_answer FROM type::record($id)`,
+        { id: sessionId },
+      )) as unknown[][];
+
+      const session = getLastDefinedResult<{
+        status?: string;
+        final_answer?: string;
+      }>(sessionResult);
+
+      if (session?.status === "completed" && session.final_answer) {
+        return session.final_answer;
+      }
+
+      if (session?.status === "error") {
+        return `Research session failed: see session ${sessionId} for details`;
+      }
+
+      // Wait before next poll
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      attempts++;
+    }
+
+    return `Research session ${sessionId} still in progress or timed out`;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return `Error in pre-plan sync: ${errorMsg}`;
+  }
 }

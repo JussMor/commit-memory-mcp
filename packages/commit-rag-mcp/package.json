@@ -2,7 +2,7 @@
   "name": "@jussmor/commit-memory-mcp-surreal",
   "version": "0.2.4",
   "mcpName": "io.github.jussmor/commit-memory-surreal",
-  "description": "Commit-aware MCP with SurrealDB-backed traceability, async team coordination, and business knowledge tools",
+  "description": "Commit-aware MCP with SurrealDB-backed traceability and business knowledge tools",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -36,7 +36,6 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:tools": "node test-tools-smoke.mjs",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {

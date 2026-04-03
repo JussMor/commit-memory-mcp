@@ -14,6 +14,12 @@ type ExtractedFact = {
   confidence: number;
 };
 
+type HeuristicSignal = {
+  predicate: string;
+  pattern: RegExp;
+  template: (match: string) => string;
+};
+
 type ModuleAccumulator = {
   facts: string[];
   overview?: string;
@@ -96,6 +102,35 @@ const COMMON_CONTAINER_DIRS = new Set([
   "services",
   "modules",
 ]);
+
+const HEURISTIC_SIGNALS: HeuristicSignal[] = [
+  {
+    predicate: "validates",
+    pattern: /\b(validate|validation|schema|zod|ajv)\b/gi,
+    template: (match) => `input and contract constraints (${match})`,
+  },
+  {
+    predicate: "requires",
+    pattern: /\b(auth|authorize|permission|role|rbac|token)\b/gi,
+    template: (match) => `authorization requirement (${match})`,
+  },
+  {
+    predicate: "limits",
+    pattern: /\b(rate\s*limit|throttle|quota|timeout|retry|backoff)\b/gi,
+    template: (match) => `operational guardrail (${match})`,
+  },
+  {
+    predicate: "persists",
+    pattern:
+      /\b(create|insert|update|delete|upsert|transaction|database|surreal)\b/gi,
+    template: (match) => `stateful data behavior (${match})`,
+  },
+  {
+    predicate: "coordinates",
+    pattern: /\b(queue|event|worker|cron|schedule|orchestrat|dispatch)\b/gi,
+    template: (match) => `workflow coordination (${match})`,
+  },
+];
 
 function stableId(parts: string[]): string {
   return createHash("sha1").update(parts.join("|"), "utf8").digest("hex");
@@ -187,6 +222,192 @@ function extractJsonArray(raw: string): unknown[] {
   }
 }
 
+function extractExportedSymbols(code: string): string[] {
+  const symbols = new Set<string>();
+  const patterns = [
+    /export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)/g,
+    /export\s+const\s+([A-Za-z0-9_]+)\s*=\s*/g,
+    /export\s+class\s+([A-Za-z0-9_]+)/g,
+  ];
+
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null = null;
+    while ((match = pattern.exec(code))) {
+      if (match[1]) {
+        symbols.add(match[1]);
+      }
+    }
+  }
+
+  return Array.from(symbols).slice(0, 8);
+}
+
+function extractHeuristicFactsFromCode(options: {
+  moduleName: string;
+  relativePath: string;
+  code: string;
+}): ExtractedFact[] {
+  const subject = `${options.moduleName} module`;
+  const seen = new Set<string>();
+  const facts: ExtractedFact[] = [];
+
+  const symbols = extractExportedSymbols(options.code);
+  if (symbols.length > 0) {
+    const object = `public API includes ${symbols.join(", ")}`;
+    seen.add(`${subject}|exposes|${object}`);
+    facts.push({
+      subject,
+      predicate: "exposes",
+      object,
+      rationale: `Derived from exported symbols in ${options.relativePath}`,
+      confidence: 0.56,
+    });
+  }
+
+  for (const signal of HEURISTIC_SIGNALS) {
+    const matches = Array.from(
+      new Set(
+        Array.from(options.code.matchAll(signal.pattern))
+          .map((entry) => entry[0]?.toLowerCase().trim() ?? "")
+          .filter(Boolean),
+      ),
+    ).slice(0, 3);
+
+    for (const match of matches) {
+      const object = signal.template(match);
+      const key = `${subject}|${signal.predicate}|${object}`;
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      facts.push({
+        subject,
+        predicate: signal.predicate,
+        object,
+        rationale: `Keyword-level reverse engineering from ${options.relativePath}`,
+        confidence: 0.52,
+      });
+    }
+  }
+
+  return facts.slice(0, 8);
+}
+
+function extractImportsFromCode(code: string): string[] {
+  const imports = new Set<string>();
+
+  // ES6 imports
+  const importRegex =
+    /import\s+(?:(?:\{[^}]*\}|\*\s+as\s+\w+|(?:\w+(?:\s*,\s*(?:\{[^}]*\}|\*\s+as\s+\w+))?)?))\s+from\s+['"]([^'"]+)['"]/g;
+  let match: RegExpExecArray | null;
+  while ((match = importRegex.exec(code))) {
+    const importPath = match[1]?.trim();
+    if (importPath) {
+      imports.add(importPath);
+    }
+  }
+
+  // CommonJS require
+  const requireRegex = /require\(['"]([^'"]+)['"]\)/g;
+  while ((match = requireRegex.exec(code))) {
+    const importPath = match[1]?.trim();
+    if (importPath) {
+      imports.add(importPath);
+    }
+  }
+
+  return Array.from(imports);
+}
+
+function resolveImportPathToModule(
+  importPath: string,
+  sourceFile: string,
+): string | null {
+  // Normalize path separators
+  const normalized = importPath.replace(/\\\\/g, "/");
+
+  // Skip node_modules and external packages for now (they're out of scope)
+  if (normalized.includes("node_modules")) {
+    return null;
+  }
+
+  // Skip relative paths that go too far up
+  if (normalized.startsWith("../../../")) {
+    return null;
+  }
+
+  // Relative imports: resolve against source file's module
+  if (normalized.startsWith("..") || normalized.startsWith(".")) {
+    const sourceDir = path.dirname(sourceFile).split(path.sep).join("/");
+    const sourceModulePath = sourceDir.split("/").slice(0, 2).join("/"); // Top 2 levels = module
+
+    const resolvedPath = path
+      .normalize(path.join(sourceDir, normalized))
+      .split(path.sep)
+      .join("/");
+
+    const resolvedModulePath = resolvedPath.split("/").slice(0, 2).join("/");
+
+    if (resolvedModulePath !== sourceModulePath) {
+      return resolvedModulePath;
+    }
+    return null;
+  }
+
+  // Absolute-style paths (from repo root)
+  const modulePath = normalized.split("/").slice(0, 2).join("/");
+  return modulePath;
+}
+
+async function extractAndLinkModuleDependencies(
+  db: Awaited<ReturnType<typeof getDb>>,
+  repoPath: string,
+  normalizedFiles: string[],
+): Promise<number> {
+  const linkedDeps = new Set<string>();
+
+  for (const filePath of normalizedFiles) {
+    try {
+      const fullPath = path.join(repoPath, filePath);
+      const content = await fs.readFile(fullPath, "utf8");
+      const imports = extractImportsFromCode(content);
+      const sourceModule = filePath.split("/").slice(0, 2).join("/");
+
+      for (const importPath of imports) {
+        const targetModule = resolveImportPathToModule(importPath, filePath);
+        if (targetModule && targetModule !== sourceModule) {
+          const edgeKey = `${sourceModule}|affects|${targetModule}`;
+          if (linkedDeps.has(edgeKey)) continue;
+
+          try {
+            await db.query(
+              `
+                LET $from = (SELECT * FROM module WHERE name = $fromName LIMIT 1);
+                LET $to = (SELECT * FROM module WHERE name = $toName LIMIT 1);
+                IF $from AND $to {
+                  LET $existing = (SELECT * FROM affects WHERE in = $from.id AND out = $to.id LIMIT 1)[0];
+                  IF $existing = NONE {
+                    RELATE $from.id -> affects -> $to.id SET confidence = 0.75;
+                  };
+                };
+              `,
+              { fromName: sourceModule, toName: targetModule },
+            );
+            linkedDeps.add(edgeKey);
+          } catch {
+            // Silently skip if module doesn't exist yet
+          }
+        }
+      }
+    } catch {
+      // Silently skip files that can't be read
+    }
+  }
+
+  return linkedDeps.size;
+}
+
 async function callOpenAiCompatible(prompt: string): Promise<string | null> {
   const url = process.env.COMMIT_RAG_LLM_URL?.trim();
   if (!url) {
@@ -268,6 +489,11 @@ async function extractFactsFromCode(options: {
 
   if (tuples.length > 0) {
     return tuples;
+  }
+
+  const heuristicFacts = extractHeuristicFactsFromCode(options);
+  if (heuristicFacts.length > 0) {
+    return heuristicFacts;
   }
 
   const fallbackSubject = `${options.moduleName} module`;
@@ -736,11 +962,6 @@ export async function bootstrapFromFilesystem(
             IF $containsExisting = NONE {
               RELATE $module -> contains -> $file SET confidence = 1.0;
             };
-
-            LET $belongsExisting = (SELECT * FROM file_belongs_to WHERE in = $file AND out = $module LIMIT 1)[0];
-            IF $belongsExisting = NONE {
-              RELATE $file -> file_belongs_to -> $module SET confidence = 1.0;
-            };
           `,
           {
             moduleKey,
@@ -769,6 +990,7 @@ export async function bootstrapFromFilesystem(
             `
               UPSERT type::record('business_fact', $factKey) CONTENT {
                 module: type::record('module', $moduleKey),
+                source_file: type::record('file', $fileKey),
                 summary: $summary,
                 rationale: $rationale,
                 search_text: $search_text,
@@ -777,6 +999,25 @@ export async function bootstrapFromFilesystem(
                 source_type: 'reverse_engineered',
                 confidence: $confidence,
                 status: 'draft',
+                created_at: time::now(),
+                updated_at: time::now()
+              };
+
+              UPSERT type::record('memory_chunk', $factKey) CONTENT {
+                module: type::record('module', $moduleKey),
+                source_file: type::record('file', $fileKey),
+                source_pr: NONE,
+                kind: 'reverse_engineered_fact',
+                source_type: 'reverse_engineered',
+                source_ref: $source_ref,
+                summary: $summary,
+                content: $content,
+                search_text: $search_text,
+                embedding: $embedding,
+                tags: [$moduleName, 'bootstrap', 'reverse_engineered'],
+                confidence: $confidence,
+                importance: 0.72,
+                status: 'active',
                 created_at: time::now(),
                 updated_at: time::now()
               };
@@ -791,12 +1032,15 @@ export async function bootstrapFromFilesystem(
             {
               factKey,
               moduleKey,
+              fileKey,
+              moduleName,
               summary,
               rationale: tuple.rationale,
+              content: `${tuple.rationale}\nSource file: ${normalizedPath}`,
+              source_ref: normalizedPath,
               search_text: searchText,
               embedding,
-              confidence: 0.5,
-              fileKey,
+              confidence: tuple.confidence,
             },
           );
 
@@ -898,8 +1142,16 @@ export async function bootstrapFromFilesystem(
     }
 
     clearBar();
+
+    // Phase 2.5: Extract module dependencies from imports
+    process.stderr.write(`Phase 2.5/2 Extracting module dependencies...\n`);
+    const linkedDependencies = await extractAndLinkModuleDependencies(
+      db,
+      repoPath,
+      normalizedFiles,
+    );
     process.stderr.write(
-      `  Phase 2/2 done  ${modulesSummarized} modules summarized\n\n`,
+      `  Phase 2.5/2 done  ${linkedDependencies} module dependencies linked\n\n`,
     );
 
     await updateBootstrapCheckpoint(db, runKey, {

@@ -176,11 +176,24 @@ export async function getDecisionLog(
         ORDER BY updated_at DESC
       );
 
+      LET $bootstrap_drafts = (
+        SELECT id, summary, rationale, confidence, status, created_at, updated_at,
+          source_file.path AS file_path
+        FROM business_fact
+        WHERE module = $mod.id
+          AND status = 'draft'
+          AND source_type = 'reverse_engineered'
+        ORDER BY updated_at DESC
+        LIMIT 20
+      );
+
       RETURN {
         module: $mod.name,
         promoted_facts: $promoted_facts,
+        bootstrap_draft_facts: $bootstrap_drafts,
         high_confidence_knowledge: $decision_knowledge,
         total_facts: count($promoted_facts),
+        total_bootstrap_drafts: count($bootstrap_drafts),
         total_knowledge: count($decision_knowledge)
       }
     `,

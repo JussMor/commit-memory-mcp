@@ -305,7 +305,9 @@ export async function whoChangedThis(
   repo: string,
 ): Promise<string> {
   const db = await getDb();
+  const { owner, name } = parseRepo(repo);
 
+  // Step 1: Get PRs from database that touched this file
   const result = await db.query(
     `
       SELECT author, title, merged_at, number
@@ -318,8 +320,27 @@ export async function whoChangedThis(
     { repo, file },
   );
 
-  const rows = ((result as unknown[])[0] as unknown[]) ?? [];
+  const prRows = ((result as unknown[])[0] as unknown[]) ?? [];
 
+  // Step 2: Use gh CLI to get recent commits that touched this file
+  let ghBlameLines: string[] = [];
+  let ghBlameError: string | null = null;
+
+  try {
+    const blameRaw = runGh([
+      "api",
+      `repos/${owner}/${name}/commits`,
+      `--jq=.[].commit | "\\(.author.name) | \\(.message)"`,
+    ]);
+    ghBlameLines = blameRaw
+      .split("\n")
+      .filter((line) => line.trim())
+      .slice(0, 10);
+  } catch (error) {
+    ghBlameError = error instanceof Error ? error.message : String(error);
+  }
+
+  // Step 3: Use git log as fallback for local blame info
   let gitLog = "";
   let gitLogError: string | null = null;
 
@@ -328,7 +349,7 @@ export async function whoChangedThis(
       "log",
       "--follow",
       "--format=%h %an %ar %s",
-      "-10",
+      "-5",
       "--",
       file,
     ]).trim();
@@ -337,7 +358,15 @@ export async function whoChangedThis(
   }
 
   return JSON.stringify(
-    { prs: rows, git_log: gitLog, git_log_error: gitLogError },
+    {
+      file,
+      repo,
+      prs_touched_file: prRows,
+      gh_recent_commits: ghBlameLines,
+      gh_error: ghBlameError,
+      local_git_log: gitLog,
+      git_log_error: gitLogError,
+    },
     null,
     2,
   );
@@ -350,10 +379,11 @@ export async function whyWasThisChanged(
 ): Promise<string> {
   const db = await getDb();
 
+  // Query by SHA (commit)
   if (sha) {
     const result = await db.query(
       `
-        SELECT title, body, number
+        SELECT title, body, number, author, merged_at
         FROM pr
         WHERE repo = $repo
           AND $sha INSIDE commits
@@ -362,17 +392,40 @@ export async function whyWasThisChanged(
       { repo, sha },
     );
 
-    const row = (((result as unknown[])[0] as unknown[]) ?? [])[0] ?? {
-      message: "No PR found for this SHA",
-    };
+    const rows = ((result as unknown[])[0] as unknown[]) ?? [];
+    const row = rows[0] ?? { message: "No PR found for this SHA" };
+
+    // Enrich with related business facts
+    if ((row as any).number) {
+      const factsResult = await db.query(
+        `
+          SELECT summary, rationale, confidence FROM business_fact
+          WHERE source_pr AND source_pr.number = $pr_number
+          ORDER BY confidence DESC
+          LIMIT 5
+        `,
+        { pr_number: (row as any).number },
+      );
+
+      const facts = ((factsResult as unknown[])[0] as unknown[]) ?? [];
+      return JSON.stringify(
+        {
+          pr: row,
+          related_business_facts: facts,
+        },
+        null,
+        2,
+      );
+    }
 
     return JSON.stringify(row, null, 2);
   }
 
+  // Query by file
   if (file) {
     const result = await db.query(
       `
-        SELECT title, body, number, merged_at
+        SELECT title, body, number, author, merged_at
         FROM pr
         WHERE repo = $repo
           AND $file INSIDE files
@@ -382,11 +435,30 @@ export async function whyWasThisChanged(
       { repo, file },
     );
 
-    return JSON.stringify(
-      ((result as unknown[])[0] as unknown[]) ?? [],
-      null,
-      2,
+    const rows = ((result as unknown[])[0] as unknown[]) ?? [];
+
+    // Enrich with business facts for each PR
+    const enriched = await Promise.all(
+      (rows as any[]).map(async (pr) => {
+        const factsResult = await db.query(
+          `
+            SELECT summary, rationale, confidence FROM business_fact
+            WHERE source_pr AND source_pr.number = $pr_number
+            ORDER BY confidence DESC
+            LIMIT 3
+          `,
+          { pr_number: pr.number },
+        );
+
+        const facts = ((factsResult as unknown[])[0] as unknown[]) ?? [];
+        return {
+          pr,
+          business_intent: facts,
+        };
+      }),
     );
+
+    return JSON.stringify(enriched, null, 2);
   }
 
   return JSON.stringify({ error: "Provide file or sha" });

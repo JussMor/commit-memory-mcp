@@ -174,56 +174,6 @@ async function ensureModule(
   return { id: `module:${moduleKey}`, key: moduleKey };
 }
 
-// Creates mentions_module graph edges from a knowledge_note to each related
-// module. Uses type::record() for safe record-ID casting, wraps each edge in
-// its own try/catch so a single bad link never aborts the whole ingestion, and
-// deduplicates by checking for an existing edge first.
-async function upsertMentionsModuleLinks(
-  db: Awaited<ReturnType<typeof getDb>>,
-  noteId: unknown,
-  relatedModuleNames: string[],
-  moduleRecords: Map<string, { id: string; key: string }>,
-): Promise<void> {
-  // noteId may be a SurrealDB SDK v2 RecordId object rather than a plain
-  // string — String() normalises either form to "table:key" before split.
-  const noteIdStr = String(noteId);
-  const colonIndex = noteIdStr.indexOf(":");
-  const noteKey =
-    colonIndex !== -1 ? noteIdStr.slice(colonIndex + 1) : noteIdStr;
-
-  for (const relatedModuleName of relatedModuleNames) {
-    const record = moduleRecords.get(relatedModuleName);
-    if (!record) {
-      continue;
-    }
-
-    try {
-      await db.query(
-        `
-          LET $noteRec = type::record('knowledge_note', $noteKey);
-          LET $modRec  = type::record('module', $moduleKey);
-          LET $existing = (
-            SELECT * FROM mentions_module
-            WHERE in = $noteRec AND out = $modRec
-            LIMIT 1
-          )[0];
-          IF $existing = NONE {
-            RELATE $noteRec -> mentions_module -> $modRec;
-          };
-        `,
-        { noteKey, moduleKey: record.key },
-      );
-    } catch (err) {
-      // Non-fatal: log and continue so a single broken edge never kills
-      // ingestion of the core knowledge note.
-      console.warn(
-        `[knowledge] mentions_module link skipped for "${relatedModuleName}":`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
-}
-
 async function upsertKnowledgeMemoryChunk(options: {
   db: Awaited<ReturnType<typeof getDb>>;
   moduleKey: string;
@@ -364,17 +314,6 @@ export async function ingestKnowledgeInvestigation(
     { moduleKey: moduleRecord.key, topic_key: topicKey },
   )) as SurrealResult;
 
-  // Pre-ensure ALL related modules exist as records before any RELATE attempts.
-  // This prevents "record does not exist" errors when the module has never been
-  // ingested before and its record isn't in the DB yet.
-  const relatedModuleRecords = new Map<string, { id: string; key: string }>();
-  for (const relatedModuleName of relatedModules) {
-    relatedModuleRecords.set(
-      relatedModuleName,
-      await ensureModule(relatedModuleName),
-    );
-  }
-
   const existing = getFirstResult<KnowledgeNote>(existingResult);
   // existing.id may be a SurrealDB SDK v2 RecordId object — normalise early.
   if (existing) {
@@ -422,16 +361,6 @@ export async function ingestKnowledgeInvestigation(
         embedding,
       },
     );
-
-    // Backfill any missing mentions_module edges even on a refresh so that
-    // newly added related_modules get linked without requiring a content change.
-    await upsertMentionsModuleLinks(
-      db,
-      existing.id,
-      relatedModules,
-      relatedModuleRecords,
-    );
-
     await upsertKnowledgeMemoryChunk({
       db,
       moduleKey: moduleRecord.key,
@@ -536,13 +465,6 @@ export async function ingestKnowledgeInvestigation(
       { createdKey, existingKey },
     );
   }
-
-  await upsertMentionsModuleLinks(
-    db,
-    created.id,
-    relatedModules,
-    relatedModuleRecords,
-  );
 
   await upsertKnowledgeMemoryChunk({
     db,

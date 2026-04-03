@@ -119,6 +119,73 @@ export async function promoteContextFacts(module: string): Promise<string> {
 // Replaces: search_context + get_module_overview + get_latest_knowledge +
 // get_decision_log.
 // ---------------------------------------------------------------------------
+
+function parseJsonObject<T>(value: string): T | null {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+type OverviewPayload = {
+  module?: {
+    description?: string;
+    status?: string;
+    updated_at?: string;
+  };
+  facts?: Array<{
+    summary?: string;
+    rationale?: string;
+    status?: string;
+    confidence?: number;
+    created_at?: string;
+  }>;
+  memory_chunks?: Array<{
+    kind?: string;
+    summary?: string;
+    content?: string;
+    confidence?: number;
+  }>;
+  latest_knowledge?: Array<{
+    topic?: string;
+    summary?: string;
+    version?: number;
+    updated_at?: string;
+  }>;
+  recent_prs?: Array<{
+    number?: number;
+    title?: string;
+  }>;
+};
+
+type DecisionPayload = {
+  promoted_facts?: Array<{
+    summary?: string;
+    rationale?: string;
+    confidence?: number;
+  }>;
+  bootstrap_draft_facts?: Array<{
+    summary?: string;
+    rationale?: string;
+    confidence?: number;
+    file_path?: string;
+  }>;
+  high_confidence_knowledge?: Array<{
+    topic?: string;
+    summary?: string;
+    confidence?: number;
+  }>;
+};
+
+type LatestKnowledgePayload = {
+  latest?: Array<{
+    topic?: string;
+    summary?: string;
+    version?: number;
+  }>;
+};
+
 export async function getModuleContext(
   module: string,
   query?: string,
@@ -130,21 +197,105 @@ export async function getModuleContext(
     query ? searchModuleContext(module, query, 8) : Promise.resolve(null),
   ]);
 
+  const overviewPayload = parseJsonObject<OverviewPayload>(overview) ?? {};
+  const decisionPayload = parseJsonObject<DecisionPayload>(decisions) ?? {};
+  const latestPayload = parseJsonObject<LatestKnowledgePayload>(latest) ?? {};
+  const searchPayload = search
+    ? parseJsonObject<Record<string, unknown>>(search)
+    : null;
+
+  const description =
+    overviewPayload.module?.description?.trim() ||
+    "No module overview available yet.";
+  const bootstrapFacts = decisionPayload.bootstrap_draft_facts ?? [];
+  const promotedFacts = decisionPayload.promoted_facts ?? [];
+  const latestKnowledge = latestPayload.latest ?? [];
+  const memoryChunks = overviewPayload.memory_chunks ?? [];
+  const recentPrs = overviewPayload.recent_prs ?? [];
+
   const sections: string[] = [
     `## Module: ${module}`,
     "",
-    "### Overview",
-    overview,
-    "",
-    "### Latest Knowledge",
-    latest,
-    "",
-    "### Decisions & Business Rules",
-    decisions,
+    "### Summary",
+    description,
   ];
 
-  if (search) {
-    sections.push("", "### Relevant Search Results", search);
+  sections.push(
+    "",
+    "### Bootstrap Draft Facts",
+    bootstrapFacts.length > 0
+      ? bootstrapFacts
+          .slice(0, 8)
+          .map(
+            (fact, index) =>
+              `${index + 1}. ${fact.summary ?? "Draft fact"}${fact.file_path ? ` [${fact.file_path}]` : ""}${fact.rationale ? `\n   ${fact.rationale}` : ""}`,
+          )
+          .join("\n")
+      : "No reverse-engineered draft facts.",
+  );
+
+  sections.push(
+    "",
+    "### Validated Facts",
+    promotedFacts.length > 0
+      ? promotedFacts
+          .slice(0, 8)
+          .map(
+            (fact, index) =>
+              `${index + 1}. ${fact.summary ?? "Fact"}${fact.rationale ? `\n   ${fact.rationale}` : ""}`,
+          )
+          .join("\n")
+      : "No promoted facts yet.",
+  );
+
+  sections.push(
+    "",
+    "### Reverse-Engineered Evidence",
+    memoryChunks.length > 0
+      ? memoryChunks
+          .slice(0, 6)
+          .map(
+            (chunk, index) =>
+              `${index + 1}. ${chunk.summary ?? chunk.kind ?? "Evidence"}${chunk.content ? `\n   ${chunk.content}` : ""}`,
+          )
+          .join("\n")
+      : "No supporting memory chunks.",
+  );
+
+  sections.push(
+    "",
+    "### Latest Knowledge",
+    latestKnowledge.length > 0
+      ? latestKnowledge
+          .slice(0, 5)
+          .map(
+            (item, index) =>
+              `${index + 1}. ${item.topic ?? "Knowledge"}: ${item.summary ?? ""}`,
+          )
+          .join("\n")
+      : "No knowledge notes yet.",
+  );
+
+  sections.push(
+    "",
+    "### Recent PR Context",
+    recentPrs.length > 0
+      ? recentPrs
+          .slice(0, 5)
+          .map(
+            (pr, index) =>
+              `${index + 1}. #${pr.number ?? "?"} ${pr.title ?? ""}`,
+          )
+          .join("\n")
+      : "No PRs linked to this module yet.",
+  );
+
+  if (searchPayload) {
+    sections.push(
+      "",
+      "### Relevant Search Results",
+      JSON.stringify(searchPayload, null, 2),
+    );
   }
 
   return sections.join("\n");

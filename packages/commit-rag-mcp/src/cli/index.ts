@@ -2,13 +2,7 @@
 
 import path from "node:path";
 import { closeDb } from "../db/client.js";
-import { indexRepository } from "../indexer.js";
 import { bootstrapFromFilesystem } from "../layers/bootstrap.js";
-
-type IndexArgs = {
-  repoPath: string;
-  limit: number;
-};
 
 type BootstrapArgs = {
   repoPath: string;
@@ -16,37 +10,6 @@ type BootstrapArgs = {
   resume: boolean;
   startPhase: 1 | 2;
 };
-
-function parseIndexArgs(argv: string[]): IndexArgs {
-  const args: IndexArgs = {
-    repoPath: process.cwd(),
-    limit: 400,
-  };
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-
-    if (arg === "--repo") {
-      args.repoPath = path.resolve(argv[i + 1] ?? process.cwd());
-      i += 1;
-      continue;
-    }
-
-    if (arg === "--limit") {
-      const value = Number.parseInt(argv[i + 1] ?? "", 10);
-      if (!Number.isFinite(value) || value <= 0) {
-        throw new Error("Invalid --limit value");
-      }
-      args.limit = value;
-      i += 1;
-      continue;
-    }
-
-    throw new Error(`Unknown argument: ${arg}`);
-  }
-
-  return args;
-}
 
 function parseBootstrapArgs(argv: string[]): BootstrapArgs {
   const args: BootstrapArgs = {
@@ -103,14 +66,12 @@ function printUsage(): void {
   process.stdout.write(
     [
       "Usage:",
-      "  commit-memory index --repo <path> [--limit <n>]",
       "  commit-memory bootstrap --repo <path> [--include <glob>] [--resume] [--start-phase <1|2>]",
       "",
       "Examples:",
       '  commit-memory bootstrap --repo ./my-legacy-app --include "src/**/*.ts"',
       '  commit-memory bootstrap --repo . --include "src/**/*.ts" --resume',
       '  commit-memory bootstrap --repo . --include "src/**/*.ts" --start-phase 2',
-      "  commit-memory index --repo . --limit 300",
       "",
     ].join("\n"),
   );
@@ -121,13 +82,6 @@ async function main(): Promise<void> {
 
   if (!command || command === "--help" || command === "-h") {
     printUsage();
-    return;
-  }
-
-  if (command === "index") {
-    const args = parseIndexArgs(rest);
-    const summary = await indexRepository(args);
-    process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
     return;
   }
 
