@@ -357,11 +357,38 @@ export async function whoChangedThis(
     gitLogError = error instanceof Error ? error.message : String(error);
   }
 
+  // Step 4: If no PRs found, surface bootstrap/reverse-engineered provenance
+  let bootstrapProvenance: unknown[] = [];
+  if ((prRows as unknown[]).length === 0) {
+    const bootstrapResult = await db.query(
+      `
+        SELECT <-reverse_engineered_from<-business_fact.{summary, rationale, confidence, source_type, created_at} AS facts
+        FROM file
+        WHERE path = $file
+        LIMIT 1
+      `,
+      { file },
+    );
+
+    bootstrapProvenance =
+      (
+        (bootstrapResult as unknown[])[0] as Array<{
+          facts?: unknown[];
+        }>
+      )?.[0]?.facts ?? [];
+  }
+
   return JSON.stringify(
     {
       file,
       repo,
       prs_touched_file: prRows,
+      bootstrap_provenance:
+        bootstrapProvenance.length > 0 ? bootstrapProvenance : undefined,
+      bootstrap_note:
+        (prRows as unknown[]).length === 0 && bootstrapProvenance.length > 0
+          ? "No PRs found. Showing reverse-engineered provenance from bootstrap."
+          : undefined,
       gh_recent_commits: ghBlameLines,
       gh_error: ghBlameError,
       local_git_log: gitLog,
@@ -436,6 +463,52 @@ export async function whyWasThisChanged(
     );
 
     const rows = ((result as unknown[])[0] as unknown[]) ?? [];
+
+    // If no PRs found, fall back to bootstrap/reverse-engineered facts
+    if (rows.length === 0) {
+      const bootstrapResult = await db.query(
+        `
+          SELECT summary, rationale, source_type, confidence, created_at
+          FROM business_fact
+          WHERE source_type = 'reverse_engineered'
+          ORDER BY confidence DESC
+          LIMIT 5
+        `,
+      );
+
+      const bootstrapFacts =
+        ((bootstrapResult as unknown[])[0] as unknown[]) ?? [];
+
+      // Also check reverse_engineered_from edges for this file
+      const edgeResult = await db.query(
+        `
+          SELECT <-reverse_engineered_from<-business_fact.{summary, rationale, confidence, source_type} AS facts
+          FROM file
+          WHERE path = $file
+          LIMIT 1
+        `,
+        { file },
+      );
+
+      const edgeFacts =
+        (
+          (edgeResult as unknown[])[0] as Array<{
+            facts?: unknown[];
+          }>
+        )?.[0]?.facts ?? [];
+
+      return JSON.stringify(
+        {
+          file,
+          source: "bootstrap",
+          note: "No PRs found for this file. Showing reverse-engineered context from bootstrap.",
+          bootstrap_context: bootstrapFacts,
+          file_linked_facts: edgeFacts,
+        },
+        null,
+        2,
+      );
+    }
 
     // Enrich with business facts for each PR
     const enriched = await Promise.all(

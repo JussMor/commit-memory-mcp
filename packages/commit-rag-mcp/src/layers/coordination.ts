@@ -226,10 +226,11 @@ export async function getStaleKnowledge(
       LET $stale_facts = (
         SELECT id, summary, rationale, confidence, status, created_at, updated_at,
           source_pr.number AS pr_number,
-          source_pr.title AS pr_title
+          source_pr.title AS pr_title,
+          source_type
         FROM business_fact
         WHERE module = $mod.id
-          AND status = 'promoted'
+          AND status INSIDE ['promoted', 'draft']
           AND updated_at < $cutoff
         ORDER BY updated_at ASC
       );
@@ -333,12 +334,13 @@ export async function getCrossModuleImpact(
       LET $at_risk_facts = (
         SELECT id, summary, rationale, confidence, status, updated_at,
           module.name AS module_name,
-          source_pr.number AS pr_number
+          source_pr.number AS pr_number,
+          source_type
         FROM business_fact
         WHERE module INSIDE (
           SELECT VALUE out FROM belongs_to WHERE in INSIDE $affected_prs.id
         )
-          AND status = 'promoted'
+          AND status INSIDE ['promoted', 'draft']
         ORDER BY updated_at DESC
         LIMIT 30
       );
@@ -638,16 +640,16 @@ export async function compactStaleKnowledge(
   const days = Math.max(1, Math.min(staleDays, 365));
   const moduleKey = sanitizeModuleName(module);
 
-  // 1. Find stale business_fact records (promoted but not updated recently)
+  // 1. Find stale business_fact records (promoted or draft, not updated recently)
   const factResult = (await db.query(
     `
       LET $mod = (SELECT id FROM module WHERE name = $name LIMIT 1)[0];
       LET $cutoff = time::now() - duration::from_days($days);
 
-      SELECT id, summary, rationale, confidence, updated_at
+      SELECT id, summary, rationale, confidence, status, updated_at
       FROM business_fact
       WHERE module = $mod.id
-        AND status = 'promoted'
+        AND status INSIDE ['promoted', 'draft']
         AND updated_at < $cutoff
       ORDER BY summary ASC
     `,

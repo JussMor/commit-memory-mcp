@@ -340,14 +340,14 @@ function resolveImportPathToModule(
   // Relative imports: resolve against source file's module
   if (normalized.startsWith("..") || normalized.startsWith(".")) {
     const sourceDir = path.dirname(sourceFile).split(path.sep).join("/");
-    const sourceModulePath = sourceDir.split("/").slice(0, 2).join("/"); // Top 2 levels = module
+    const sourceModulePath = inferModuleFromPath(sourceFile);
 
     const resolvedPath = path
       .normalize(path.join(sourceDir, normalized))
       .split(path.sep)
       .join("/");
 
-    const resolvedModulePath = resolvedPath.split("/").slice(0, 2).join("/");
+    const resolvedModulePath = inferModuleFromPath(resolvedPath);
 
     if (resolvedModulePath !== sourceModulePath) {
       return resolvedModulePath;
@@ -356,8 +356,7 @@ function resolveImportPathToModule(
   }
 
   // Absolute-style paths (from repo root)
-  const modulePath = normalized.split("/").slice(0, 2).join("/");
-  return modulePath;
+  return inferModuleFromPath(normalized);
 }
 
 async function extractAndLinkModuleDependencies(
@@ -372,7 +371,7 @@ async function extractAndLinkModuleDependencies(
       const fullPath = path.join(repoPath, filePath);
       const content = await fs.readFile(fullPath, "utf8");
       const imports = extractImportsFromCode(content);
-      const sourceModule = filePath.split("/").slice(0, 2).join("/");
+      const sourceModule = inferModuleFromPath(filePath);
 
       for (const importPath of imports) {
         const targetModule = resolveImportPathToModule(importPath, filePath);

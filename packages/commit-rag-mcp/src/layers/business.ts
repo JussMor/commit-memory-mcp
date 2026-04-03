@@ -637,7 +637,8 @@ export async function getModuleGraph(moduleName: string): Promise<string> {
         module: $mod.name,
         affects: (SELECT ->affects->module.name AS name FROM $mod.id)[0].name,
         required_by: (SELECT ->required_by->module.name AS name FROM $mod.id)[0].name,
-        affected_by: (SELECT <-affects<-module.name AS name FROM $mod.id)[0].name
+        affected_by: (SELECT <-affects<-module.name AS name FROM $mod.id)[0].name,
+        files: (SELECT VALUE ->contains->file.path FROM $mod.id)[0]
       }
     `,
     { name: moduleName },
