@@ -13,16 +13,15 @@
         "SURREAL_NS": "main",
         "SURREAL_DB": "main",
         "COMMIT_RAG_LLM_URL": "http://127.0.0.1:11434/v1/chat/completions",
-        "COMMIT_RAG_LLM_MODEL": "gemma4",
+        "COMMIT_RAG_LLM_MODEL": "llama3.1",
         "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
-        "OLLAMA_CHAT_MODEL": "gemma4"
+        "OLLAMA_CHAT_MODEL": "llama3.1"
       }
     },
     "SurrealDB": {
       "type": "stdio",
       "command": "${workspaceFolder}/scripts/run-surrealmcp.sh",
-      "args": [
-      ]
+      "args": []
     }
   }
 }
