@@ -382,12 +382,12 @@ async function extractAndLinkModuleDependencies(
           try {
             await db.query(
               `
-                LET $from = (SELECT * FROM module WHERE name = $fromName LIMIT 1);
-                LET $to = (SELECT * FROM module WHERE name = $toName LIMIT 1);
-                IF $from AND $to {
-                  LET $existing = (SELECT * FROM affects WHERE in = $from.id AND out = $to.id LIMIT 1)[0];
+                LET $from = (SELECT VALUE id FROM module WHERE name = $fromName LIMIT 1)[0];
+                LET $to = (SELECT VALUE id FROM module WHERE name = $toName LIMIT 1)[0];
+                IF $from != NONE AND $to != NONE {
+                  LET $existing = (SELECT * FROM affects WHERE in = $from AND out = $to LIMIT 1)[0];
                   IF $existing = NONE {
-                    RELATE $from.id -> affects -> $to.id SET confidence = 0.75;
+                    RELATE $from -> affects -> $to SET confidence = 0.75;
                   };
                 };
               `,
